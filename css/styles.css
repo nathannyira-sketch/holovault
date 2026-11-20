@@ -226,7 +226,7 @@ body.refreshing .ghost-btn .ic { animation: spin 1s linear infinite; }
 .seg.glass { background: rgba(10, 10, 28, 0.55); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-color: rgba(255, 255, 255, 0.14); }
 
 .search-form { display: flex; gap: 8px; margin-bottom: 6px; }
-.num-input { width: 74px; flex: none; height: 46px; border-radius: 14px; padding: 0 10px; background: var(--surface); border: 1px solid var(--line); outline: 0; text-align: center; }
+.num-input { width: 62px; flex: none; height: 46px; border-radius: 14px; padding: 0 10px; background: var(--surface); border: 1px solid var(--line); outline: 0; text-align: center; }
 .num-input:focus { border-color: var(--accent2); }
 .lang-row { margin: 2px 0 12px; }
 
@@ -234,6 +234,14 @@ body.refreshing .ghost-btn .ic { animation: spin 1s linear infinite; }
 .scan-preview img { width: 64px; border-radius: 6px; }
 .detected { font-size: 18px; font-weight: 700; margin: 2px 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 
+.cand-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -4px 0 12px; }
+.chip.sm { height: 30px; padding: 0 11px; font-size: 13px; }
+.ocr-debug { margin: -4px 0 14px; font-size: 13px; }
+.ocr-debug summary { cursor: pointer; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.ocr-debug summary .ic { width: 15px; }
+.ocr-debug figure { margin: 8px 0 0; }
+.ocr-debug img { width: 100%; border-radius: 6px; background: #fff; }
+.ocr-debug figcaption { font-size: 11.5px; color: var(--muted); word-break: break-word; margin-top: 2px; }
 .results { display: flex; flex-direction: column; gap: 8px; }
 .result { display: flex; align-items: center; gap: 12px; padding: 8px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); text-align: left; transition: background 0.2s; }
 .result:active { background: var(--surface2); }

@@ -432,16 +432,15 @@ async function analyze(canvas) {
   let res = {};
   try {
     res = await scanner.recognizeCard(canvas, S.settings.game, m => {
-      if (!txt) return;
-      if (m.status === 'recognizing text') txt.textContent = t('analyzing');
-      else if (m.progress != null) txt.textContent = `${t('loadingOcr')} ${Math.round(m.progress * 100)} %`;
-    });
+      if (!txt || m.status === 'recognizing text') return;
+      if (m.progress != null) txt.textContent = `${t('loadingOcr')} ${Math.round(m.progress * 100)} %`;
+    }, (i, n) => { if (txt) txt.textContent = `${t('analyzing')} ${i}/${n}`; });
   } catch (e) {
     console.warn(e);
     toast(t('ocrFailed'), 'warn');
   }
   busy.hidden = true;
-  openSearch({ game: S.settings.game, query: res.name || '', number: res.number || '', total: res.total || '', photo, fromScan: true });
+  openSearch({ game: S.settings.game, query: res.name || '', number: res.number || '', total: res.total || '', candidates: res.candidates || [], debug: res.debug, photo, fromScan: true });
 }
 
 // ---------------------------------------------------------------- RECHERCHE
@@ -455,6 +454,12 @@ function openSearch(o = {}) {
       <div class="detected">${o.query ? esc(o.query) : `<span class="muted">${t('nothingRead')}</span>`}
       ${o.number ? `<span class="pill">#${esc(o.number)}${o.total ? '/' + esc(o.total) : ''}</span>` : ''}</div>
       <div class="muted small">${t('detectedHelp')}</div></div></div>` : ''}
+    ${o.candidates?.length > 1 ? `<div class="cand-row"><span class="muted small">${t('wordsRead')}</span>
+      ${o.candidates.map(c => `<button type="button" class="chip sm" data-cand="${esc(c)}">${esc(c)}</button>`).join('')}</div>` : ''}
+    ${o.debug ? `<details class="ocr-debug"><summary>${icon('info')} ${t('whatWasRead')}</summary>
+      <p class="muted small">${t('debugHelp')} · ${esc(o.debug.size)} px</p>
+      ${[...o.debug.top, ...o.debug.bottom].map(d => `<figure><img src="${d.img}" alt=""><figcaption>${esc(d.mode)} : ${esc(d.text.replace(/\s+/g, ' ').trim().slice(0, 140)) || '∅'}</figcaption></figure>`).join('')}
+    </details>` : ''}
     <div class="seg" id="s-game">${Object.keys(GAMES).map(k => `<button type="button" data-g="${k}" class="${game === k ? 'on' : ''}">${GAMES[k].label}</button>`).join('')}</div>
     <form class="search-form" id="s-form">
       <label class="search">${icon('search')}<input name="q" value="${esc(o.query || '')}" placeholder="${t('cardName')}" autocomplete="off" enterkeyhint="search"></label>
@@ -472,8 +477,15 @@ function openSearch(o = {}) {
     if (!q && !num) { out.innerHTML = `<p class="muted center">${t('typeName')}</p>`; return; }
     out.innerHTML = Array(5).fill('<div class="result skeleton"><div></div><div></div></div>').join('');
     let list = [];
-    try { list = await providers[game].search(q, { lang, number: num, total: o.total }); }
-    catch (e) { out.innerHTML = `<p class="error center">${t('networkError')}</p>`; return; }
+    // tant que l'utilisateur n'a pas retouché le nom lu, on essaie aussi les autres mots lus sur la carte
+    const candidates = q === (o.query || '') ? (o.candidates || []) : [];
+    try {
+      list = await providers[game].search(q, { lang, number: num, total: o.total, candidates });
+      for (const c of candidates) {
+        if (list.length) break;
+        if (c !== q) list = await providers[game].search(c, { lang, number: num, total: o.total });
+      }
+    } catch (e) { out.innerHTML = `<p class="error center">${t('networkError')}</p>`; return; }
     if (!list.length) {
       const other = lang === 'fr' ? 'en' : 'fr';
       out.innerHTML = `<div class="empty small"><p>${t('noResult')}</p>
@@ -504,6 +516,7 @@ function openSearch(o = {}) {
     run();
   });
   $$('.lang-row [data-l]', body).forEach(b => b.onclick = () => { lang = b.dataset.l; syncLang(); run(); });
+  $$('[data-cand]', body).forEach(b => b.onclick = () => { form.q.value = b.dataset.cand; run(); });
   if (o.query || o.number) run(); else setTimeout(() => form.q.focus(), 350);
 }
 

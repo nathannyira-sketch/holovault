@@ -5,10 +5,16 @@ let workerPromise = null;
 
 export async function startCamera(video) {
   stopCamera();
-  stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-    audio: false,
-  });
+  const base = { facingMode: { ideal: 'environment' } };
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { ...base, width: { ideal: 2560 }, height: { ideal: 1440 } }, audio: false });
+  } catch {
+    stream = await navigator.mediaDevices.getUserMedia({ video: base, audio: false });
+  }
+  // Mise au point continue quand le téléphone le permet (gros gain de netteté de près)
+  const track = stream.getVideoTracks()[0];
+  const caps = track.getCapabilities?.() || {};
+  if (caps.focusMode?.includes('continuous')) track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
   video.srcObject = stream;
   await video.play().catch(() => {});
   return stream;
@@ -31,15 +37,17 @@ export async function setTorch(on) {
   return true;
 }
 
-// Découpe la zone du cadre-guide dans l'image vidéo (vidéo affichée en object-fit: cover)
+// Découpe la zone du cadre-guide (+ une petite marge) dans l'image vidéo (affichée en object-fit: cover)
 export function captureCard(video, guide) {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) throw new Error('camera not ready');
   const vr = video.getBoundingClientRect(), gr = guide.getBoundingClientRect();
   const scale = Math.max(vr.width / vw, vr.height / vh);
   const ox = (vr.width - vw * scale) / 2, oy = (vr.height - vh * scale) / 2;
-  let sx = (gr.left - vr.left - ox) / scale, sy = (gr.top - vr.top - oy) / scale;
-  let sw = gr.width / scale, sh = gr.height / scale;
+  const m = 0.04; // marge : la carte déborde souvent un peu du cadre
+  let sx = (gr.left - vr.left - ox) / scale - (gr.width / scale) * m;
+  let sy = (gr.top - vr.top - oy) / scale - (gr.height / scale) * m;
+  let sw = (gr.width / scale) * (1 + 2 * m), sh = (gr.height / scale) * (1 + 2 * m);
   sx = Math.max(0, sx); sy = Math.max(0, sy);
   sw = Math.min(sw, vw - sx); sh = Math.min(sh, vh - sy);
   const c = document.createElement('canvas');
@@ -55,7 +63,7 @@ export async function fileToCanvas(file) {
   let sw = bmp.width, sh = bmp.height;
   if (sw / sh > ratio) sw = sh * ratio; else sh = sw / ratio;
   const sx = (bmp.width - sw) / 2, sy = (bmp.height - sh) / 2;
-  const k = Math.min(1, 1600 / sh);
+  const k = Math.min(1, 2000 / sh);
   const c = document.createElement('canvas');
   c.width = Math.round(sw * k); c.height = Math.round(sh * k);
   c.getContext('2d').drawImage(bmp, sx, sy, sw, sh, 0, 0, c.width, c.height);
@@ -83,7 +91,7 @@ function getWorker() {
   if (!workerPromise) {
     workerPromise = (async () => {
       if (!window.Tesseract) await loadScript(TESSERACT_URL);
-      return window.Tesseract.createWorker(['eng', 'fra'], 1, { logger: m => progressCb?.(m) });
+      return window.Tesseract.createWorker(['fra', 'eng'], 1, { logger: m => progressCb?.(m) });
     })().catch(e => { workerPromise = null; throw e; });
   }
   return workerPromise;
@@ -92,84 +100,152 @@ function getWorker() {
 // Précharge le moteur de lecture en arrière-plan
 export function warmup() { getWorker().catch(() => {}); }
 
-// Zones de lecture (fractions de la carte) : [x, y, largeur, hauteur]
+// Bandes de lecture larges (fractions de l'image) : [x, y, largeur, hauteur]
+// Larges exprès : la carte n'est jamais parfaitement alignée sur le cadre.
 const REGIONS = {
-  pokemon: { name: [0.03, 0.02, 0.74, 0.1], num: [0, 0.875, 1, 0.125] },
-  mtg: { name: [0.04, 0.03, 0.72, 0.08], num: [0, 0.89, 0.55, 0.11] },
-  yugioh: { name: [0.04, 0.025, 0.8, 0.09], num: [0.4, 0.69, 0.6, 0.075] },
+  pokemon: { name: [0, 0, 1, 0.22], num: [0, 0.8, 1, 0.2] },
+  mtg: { name: [0, 0, 1, 0.22], num: [0, 0.8, 1, 0.2] },
+  yugioh: { name: [0, 0, 1, 0.2], num: [0.15, 0.6, 0.85, 0.25] },
 };
 
-// Recadre, agrandit, passe en niveaux de gris et étire le contraste
-function prep(src, [fx, fy, fw, fh]) {
+// Recadre et agrandit une bande, puis applique un traitement :
+//  'raw'   couleur telle quelle
+//  'gray'  niveaux de gris + contraste robuste (percentiles 2 % / 98 %)
+//  'adapt' seuillage adaptatif (Bradley) : texte noir sur blanc même sur fond chargé / reflet
+function prep(src, [fx, fy, fw, fh], { width = 1400, mode = 'gray' } = {}) {
   const sx = fx * src.width, sy = fy * src.height, sw = fw * src.width, sh = fh * src.height;
-  const k = Math.max(1, Math.min(4, 1400 / sw));
+  const k = Math.max(0.5, Math.min(4, width / sw));
+  const W = Math.round(sw * k), H = Math.round(sh * k);
   const c = document.createElement('canvas');
-  c.width = Math.round(sw * k); c.height = Math.round(sh * k);
+  c.width = W; c.height = H;
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(src, sx, sy, sw, sh, 0, 0, c.width, c.height);
-  const img = ctx.getImageData(0, 0, c.width, c.height);
+  ctx.drawImage(src, sx, sy, sw, sh, 0, 0, W, H);
+  if (mode === 'raw') return c;
+  const img = ctx.getImageData(0, 0, W, H);
   const d = img.data;
-  let min = 255, max = 0, sum = 0;
-  for (let i = 0; i < d.length; i += 4) {
-    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    d[i] = g; if (g < min) min = g; if (g > max) max = g; sum += g;
-  }
-  const mean = sum / (d.length / 4);
-  const invert = mean < 110; // texte clair sur fond sombre
-  const range = Math.max(1, max - min);
-  for (let i = 0; i < d.length; i += 4) {
-    let g = ((d[i] - min) / range) * 255;
-    if (invert) g = 255 - g;
-    d[i] = d[i + 1] = d[i + 2] = g;
+  const n = W * H;
+  const gray = new Float64Array(n);
+  for (let i = 0, p = 0; p < n; i += 4, p++) gray[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  const put = (p, v) => { const i = p * 4; d[i] = d[i + 1] = d[i + 2] = v; };
+  if (mode === 'adapt') {
+    const S = new Float64Array((W + 1) * (H + 1)); // image intégrale
+    for (let y = 0; y < H; y++) {
+      let row = 0;
+      for (let x = 0; x < W; x++) { row += gray[y * W + x]; S[(y + 1) * (W + 1) + x + 1] = S[y * (W + 1) + x + 1] + row; }
+    }
+    const r = Math.max(8, Math.round(W / 24)), T = 0.15;
+    for (let y = 0; y < H; y++) {
+      const y1 = Math.max(0, y - r), y2 = Math.min(H - 1, y + r);
+      for (let x = 0; x < W; x++) {
+        const x1 = Math.max(0, x - r), x2 = Math.min(W - 1, x + r);
+        const cnt = (x2 - x1 + 1) * (y2 - y1 + 1);
+        const sum = S[(y2 + 1) * (W + 1) + x2 + 1] - S[y1 * (W + 1) + x2 + 1] - S[(y2 + 1) * (W + 1) + x1] + S[y1 * (W + 1) + x1];
+        put(y * W + x, gray[y * W + x] * cnt < sum * (1 - T) ? 0 : 255);
+      }
+    }
+  } else {
+    const hist = new Uint32Array(256);
+    for (let p = 0; p < n; p++) hist[gray[p] | 0]++;
+    let lo = 0, hi = 255, acc = 0;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= n * 0.02) { lo = v; break; } }
+    acc = 0;
+    for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= n * 0.02) { hi = v; break; } }
+    const range = Math.max(1, hi - lo);
+    for (let p = 0; p < n; p++) put(p, Math.max(0, Math.min(255, ((gray[p] - lo) / range) * 255)));
   }
   ctx.putImageData(img, 0, 0);
   return c;
 }
 
-const STOP = /\b(PV|HP|PS|BASE|BASIC|BASIQUE|STAGE|NIVEAU|NIV|LV|LEVEL|EVOLUTION|ÉVOLUTION|EVOLVES|FROM|TRAINER|DRESSEUR|ITEM|OBJET|SUPPORTER|STADE|STADIUM|ENERGY|ÉNERGIE|POKEMON|POKÉMON|TOOL|OUTIL)\b/gi;
+const fold = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+const STOP = new Set(('PV HP PS BASE BASIC BASIQUE STAGE NIVEAU NIV LV LEVEL EVOLUTION EVOLUE EVOLVES FROM TRAINER DRESSEUR '
+  + 'ITEM OBJET SUPPORTER STADE STADIUM ENERGY ENERGIE POKEMON TOOL OUTIL VMAX VSTAR GX EX TAG TEAM ILLUS ILLUSTRATION '
+  + 'ATTAQUE TALENT CAPACITE ABILITY POUVOIR FAIBLESSE RESISTANCE RETRAITE WEAKNESS RESISTANCE RETREAT DE DU DES LA LE LES '
+  + 'THE OF AND ET UN UNE CREATURE INSTANT SORCERY RITUEL EPHEMERE ENCHANTMENT ARTIFACT LAND TERRAIN MONSTER MONSTRE SPELL TRAP '
+  + 'MAGIE PIEGE EFFECT EFFET CARD CARTE').split(' '));
 
-function cleanName(s) {
-  return String(s || '')
-    .replace(/[0-9]+/g, ' ')
-    .replace(STOP, ' ')
-    .replace(/[^A-Za-zÀ-ÿ'’\-. ]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(' ')
-    .filter(w => w.replace(/[^A-Za-zÀ-ÿ]/g, '').length >= 2)
-    .slice(0, 4)
-    .join(' ');
-}
-
-function bestName(data) {
-  const lines = (data?.lines || [])
-    .map(l => ({ clean: cleanName(l.text), h: l.bbox.y1 - l.bbox.y0, conf: l.confidence }))
-    .filter(l => l.clean.replace(/[^A-Za-zÀ-ÿ]/g, '').length >= 3 && l.conf > 20);
-  lines.sort((a, b) => (b.h - a.h) || (b.conf - a.conf));
-  return lines[0]?.clean || cleanName(data?.text);
+// Mots lisibles de la bande du haut (filtrés), du plus gros au plus petit
+function nameWords(data) {
+  const words = (data?.words || []).map(w => {
+    let t = String(w.text || '').replace(/[^A-Za-zÀ-ÿ'’\-.]/g, '').replace(/^[-.'’]+|[-.'’]+$/g, '');
+    t = t.replace(/[-–](ex|gx|v|vmax|vstar)$/i, '');
+    const letters = t.replace(/[^A-Za-zÀ-ÿ]/g, '');
+    return { t, letters, h: w.bbox.y1 - w.bbox.y0, conf: w.confidence };
+  }).filter(w => w.letters.length >= 3 && w.conf >= 15 && !STOP.has(fold(w.letters))
+    // un mot plausible a des voyelles et pas trop de majuscules au milieu
+    && /[aeiouyàâäéèêëîïôöùûü]/i.test(w.letters) && !/[a-zà-ÿ][A-Z]{2,}/.test(w.t));
+  return words.map(w => ({ t: w.t, key: fold(w.t), score: w.h * (0.5 + w.conf / 200) * (w.letters.length >= 4 ? 1 : 0.6) }));
 }
 
 function parseNumber(text, game) {
-  const t = String(text || '').replace(/[Oo](?=\d)|(?<=\d)[Oo]/g, '0');
+  const raw = String(text || '');
   if (game === 'yugioh') {
-    const m = t.toUpperCase().match(/([A-Z0-9]{3,4})\s*-\s*([A-Z]{2})?\s*([0-9O]{3})/);
+    const m = raw.toUpperCase().replace(/\s+/g, ' ').match(/([A-Z0-9]{3,4})\s?-\s?([A-Z]{2})?\s?([0-9O]{3})/);
     return m ? { number: `${m[1]}-${m[2] || ''}${m[3].replace(/O/g, '0')}` } : {};
   }
-  const sp = t.match(/([A-Z]{0,2}\d{1,3})\s*[\/|\\]\s*([A-Z]{0,2}\d{2,3})/i);
-  if (sp) return { number: sp[1].toUpperCase(), total: sp[2].replace(/\D/g, '') };
-  const lone = t.match(/\b(\d{2,4})\b/);
-  return lone ? { number: lone[1] } : {};
+  // variantes de lecture : O→0 puis I/l→1
+  const variants = [raw.replace(/[Oo]/g, '0'), raw.replace(/[Oo]/g, '0').replace(/[Il]/g, '1')];
+  for (const t of variants) {
+    const sp = t.match(/((?:TG|GG|SV|RC)?\d{1,3})\s{0,2}[\/\\|]\s{0,2}((?:TG|GG|SV|RC)?\d{2,3})/i);
+    if (sp) return { number: sp[1].toUpperCase(), total: sp[2].replace(/\D/g, '') };
+  }
+  if (game === 'mtg') {
+    const lone = variants[0].match(/\b(\d{1,4})\b/);
+    if (lone) return { number: lone[1] };
+  }
+  return {};
 }
 
-export async function recognizeCard(canvas, game, onProgress) {
+const small = c => { const k = Math.min(1, 700 / c.width); const o = document.createElement('canvas'); o.width = c.width * k; o.height = c.height * k; o.getContext('2d').drawImage(c, 0, 0, o.width, o.height); return o.toDataURL('image/jpeg', 0.7); };
+
+export { prep as _prep }; // pour le banc d'essai (test/ocr-sim.js)
+// Passes retenues après comparatif sur photos simulées (voir test/ocr-sim.js) :
+// le nom ressort selon les cartes avec l'une OU l'autre, on combine donc les trois.
+const NAME_PASSES = [{ mode: 'adapt', psm: '6' }, { mode: 'adapt', psm: '11' }, { mode: 'raw', psm: '11' }];
+const NUM_PASSES = [{ mode: 'gray', psm: '11' }, { mode: 'adapt', psm: '11' }];
+
+// onStep(i, total) : avancement de la lecture
+export async function recognizeCard(canvas, game, onProgress, onStep) {
   progressCb = onProgress;
-  const worker = await getWorker();
-  const R = REGIONS[game] || REGIONS.pokemon;
-  await worker.setParameters({ tessedit_pageseg_mode: '6' });
-  const a = await worker.recognize(prep(canvas, R.name));
-  await worker.setParameters({ tessedit_pageseg_mode: '11' });
-  const b = await worker.recognize(prep(canvas, R.num));
-  progressCb = null;
-  return { name: bestName(a.data), ...parseNumber(b.data.text, game) };
+  try {
+    const worker = await getWorker();
+    const R = REGIONS[game] || REGIONS.pokemon;
+    const steps = NAME_PASSES.length + NUM_PASSES.length;
+    let step = 0;
+    const debug = { size: `${canvas.width}×${canvas.height}`, top: [], bottom: [] };
+
+    // NOM : plusieurs traitements, on garde les mots lus plusieurs fois et/ou en gros
+    const pool = new Map();
+    for (const { mode, psm } of NAME_PASSES) {
+      onStep?.(++step, steps);
+      await worker.setParameters({ tessedit_pageseg_mode: psm });
+      const img = prep(canvas, R.name, { width: 1300, mode });
+      const r = await worker.recognize(img);
+      debug.top.push({ mode: `${mode}/${psm}`, text: r.data.text, img: small(img) });
+      const seenHere = new Set();
+      for (const w of nameWords(r.data)) {
+        const e = pool.get(w.key) || { t: w.t, n: 0, score: 0 };
+        if (!seenHere.has(w.key)) { e.n++; seenHere.add(w.key); }
+        e.score = Math.max(e.score, w.score);
+        pool.set(w.key, e);
+      }
+    }
+    const candidates = [...pool.values()].sort((a, b) => (b.n - a.n) || (b.score - a.score)).slice(0, 6).map(e => e.t);
+
+    // NUMÉRO : on s'arrête dès qu'un « 051/064 » est lu
+    let num = {};
+    for (const { mode, psm } of NUM_PASSES) {
+      onStep?.(++step, steps);
+      await worker.setParameters({ tessedit_pageseg_mode: psm });
+      const img = prep(canvas, R.num, { width: 2000, mode });
+      const r = await worker.recognize(img);
+      debug.bottom.push({ mode: `${mode}/${psm}`, text: r.data.text, img: small(img) });
+      num = parseNumber(r.data.text, game);
+      if (num.number) break;
+    }
+    return { name: candidates[0] || '', candidates, ...num, debug };
+  } finally {
+    progressCb = null;
+  }
 }

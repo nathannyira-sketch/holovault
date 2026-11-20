@@ -39,11 +39,16 @@ function similarity(a, b) {
 
 function rank(list, { query, number, total }) {
   const n = number ? normNum(number) : null;
+  const queries = (Array.isArray(query) ? query : [query]).filter(Boolean);
+  const sim = name => Math.max(0, ...queries.map(q => Math.max(
+    similarity(q, name),
+    similarity(q, String(name || '').split(/[\s-]/)[0]) * 0.9, // « Dracaufeu » ≈ « Dracaufeu VMAX »
+  )));
   list.forEach((r, i) => {
     r.numMatch = !!n && normNum(r.number) === n;
     r.score = (r.numMatch ? 10 : 0)
       + (total && r.setTotal && +r.setTotal === +total ? 5 : 0)
-      + Math.max(similarity(query, r.name), similarity(query, r.altName)) * 4
+      + Math.max(sim(r.name), sim(r.altName)) * 4
       + (r.thumb ? 0.5 : 0)
       - i * 0.0001;
   });
@@ -64,30 +69,34 @@ function pokemonSets(lang) {
 const tcgdexImg = (base, q) => (base ? `${base}/${q}.webp` : null);
 
 const pokemon = {
-  async search(query, { lang = 'fr', number, total } = {}) {
+  async search(query, { lang = 'fr', number, total, candidates = [] } = {}) {
     const sets = await pokemonSets(lang);
     const fetchQ = q => getJSON(`${TCGDEX}/${lang}/cards?${q}&pagination:itemsPerPage=500`).catch(() => null);
     const fetchName = q => fetchQ(`name=${encodeURIComponent(q)}`);
     const setTotalOf = c => sets[c.id.slice(0, c.id.lastIndexOf('-'))]?.cardCount?.official;
     query = (query || '').trim();
-    const first = query.split(' ')[0];
-    // 1) nom complet + nom sans sa 1re lettre (gère « Evoli » / « Évoli » et une 1re lettre mal lue)
-    // 2) numéro exact dans une série de la bonne taille (utile quand le nom est mal lu)
+    // Noms à essayer : la saisie + les autres mots candidats lus sur la carte
+    const names = [...new Set([query, ...candidates.slice(0, 5)].filter(w => w && w.length >= 3))];
+    // 1) chaque nom + ce nom sans sa 1re lettre (gère « Evoli » / « Évoli » et une 1re lettre mal lue)
+    // 2) numéro exact dans une série de la bonne taille (fonctionne même si le nom est illisible)
     const byNumber = async () => {
       if (!number || !total) return [];
       const variants = [...new Set([number, normNum(number), String(normNum(number)).padStart(3, '0')])];
-      const res = await Promise.all(variants.map(v => fetchQ(`localId=${encodeURIComponent(v)}`)));
-      return res.flat().filter(c => c && +setTotalOf(c) === +total);
+      const res = (await Promise.all(variants.map(v => fetchQ(`localId=${encodeURIComponent(v)}`)))).flat().filter(Boolean);
+      const exact = res.filter(c => +setTotalOf(c) === +total);
+      // un chiffre du total mal lu (164 au lieu de 165) : on tolère ±1 s'il n'y a rien d'exact
+      return exact.length ? exact : res.filter(c => Math.abs(+setTotalOf(c) - +total) === 1);
     };
-    const [a, b, n] = await Promise.all([
-      query ? fetchName(query) : null,
-      first.length >= 4 ? fetchName(first.slice(1)) : null,
-      byNumber(),
-    ]);
-    let list = [...(n || []), ...(a || []), ...(b || [])];
+    const nameReqs = names.flatMap(nm => {
+      const first = nm.split(' ')[0];
+      return [fetchName(nm), first.length >= 4 ? fetchName(first.slice(1)) : null];
+    });
+    const [n, ...byName] = await Promise.all([byNumber(), ...nameReqs]);
+    const nameHits = byName.flatMap(r => r || []);
+    let list = [...(n || []), ...nameHits];
     // 3) repli : chaque mot (du plus long au plus court) et ses fragments
-    if (!(a?.length || b?.length)) {
-      const words = query.split(' ').filter(w => w.length >= 4).sort((x, y) => y.length - x.length);
+    if (!nameHits.length) {
+      const words = [...new Set(names.flatMap(nm => nm.split(' ')).filter(w => w.length >= 4).sort((x, y) => y.length - x.length))];
       for (const w of words) {
         let r = null;
         for (const frag of [w, w.slice(1), w.slice(0, -1), w.slice(1, -1)]) {
@@ -109,7 +118,7 @@ const pokemon = {
         thumb: tcgdexImg(c.image, 'low') || (s?.logo ? `${s.logo}.webp` : null),
       };
     });
-    return rank(out, { query, number, total }).slice(0, 80);
+    return rank(out, { query: names, number, total }).slice(0, 80);
   },
 
   async getDetails(apiId, lang = 'fr') {
