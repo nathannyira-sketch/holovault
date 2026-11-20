@@ -13,6 +13,7 @@ Aucune inscription, aucun serveur : la collection reste **uniquement sur ton té
 | 🔎 **Recherche manuelle** | Par nom (FR ou EN), numéro et **série** (menu déroulant groupé par génération), ou parcours complet d'une série. |
 | 💶 **Prix du marché** | Cardmarket (€ : tendance, plus bas, moyennes 24 h / 7 j / 30 j) et TCGplayer ($). Verdict « en hausse / en baisse / stable », liens Cardmarket, TCGplayer et ventes eBay terminées. |
 | 📈 **Analyse** | Valeur totale, plus-value vs prix d'achat, tendance du marché 30 j de ta collection, historique jour par jour, plus fortes hausses/baisses, top 10, répartition par jeu et par rareté, progression des séries. |
+| 📚 **Collection par séries** | Onglets : Aperçu (dernières recrues, toutes tes séries avec progression), un onglet **classeur** par série (possédées / manquantes / classeur complet, ajout d'une manquante en un tap) et « Toutes ». Lueur selon la rareté, confettis aux étapes 25/50/75/100 %. |
 | 🗂️ **Archive** | Quantité, version (normale / holo / reverse / 1re éd.), état (NM → PO) avec décote automatique, gradation (PSA…), valeur perso, langue, notes, ta photo du scan. |
 | ❤️ **Liste d'envies** | Suivre le prix des cartes que tu cherches, puis « Je l'ai eue ! » pour la passer en collection. |
 | ✨ Confort | Doubles (pour les échanges), tri/filtre/recherche, vue grille ou liste, effet holographique au doigt/gyroscope, vibrations, mode hors ligne, FR/EN, € ou $, sauvegarde/restauration JSON, export CSV (Excel), partage de collection avec un ami. |

@@ -370,22 +370,58 @@ export function listSets(game, lang = 'fr') {
       const serieName = Object.fromEntries((series || []).map(s => [s.id, s.name]));
       const serieOrder = Object.fromEntries((series || []).map((s, i) => [s.id, i]));
       const serieOf = s => { const parts = (s.logo || s.symbol || '').split('/'); return parts.length > 3 ? parts[parts.length - 3] : 'misc'; };
-      return (sets || []).map((s, i) => ({ id: s.id, name: s.name, total: s.cardCount?.official, serie: serieOf(s), i }))
+      return (sets || []).map((s, i) => ({ id: s.id, name: s.name, total: s.cardCount?.official, serie: serieOf(s), i, logo: s.logo ? `${s.logo}.webp` : null }))
         .filter(s => s.serie !== 'tcgp') // Pokémon TCG Pocket : jeu mobile, pas de cartes physiques
         .sort((a, b) => ((serieOrder[b.serie] ?? -1) - (serieOrder[a.serie] ?? -1)) || (b.i - a.i))
-        .map(s => ({ id: s.id, name: s.name, total: s.total, group: serieName[s.serie] || s.serie }));
+        .map(s => ({ id: s.id, name: s.name, total: s.total, logo: s.logo, group: serieName[s.serie] || s.serie }));
     }
     if (game === 'mtg') {
       const d = await getJSON(`${SCRY}/sets`);
       return (d?.data || []).filter(s => !s.digital && MTG_TYPES.has(s.set_type) && s.card_count > 0)
         .sort((a, b) => (b.released_at || '').localeCompare(a.released_at || ''))
-        .map(s => ({ id: s.code, name: s.name, total: s.card_count, group: year(s.released_at) }));
+        .map(s => ({ id: s.code, name: s.name, total: s.card_count, logo: s.icon_svg_uri, group: year(s.released_at) }));
     }
     const d = await getJSON(`${YGO}/cardsets.php`);
     return (d || []).sort((a, b) => (b.tcg_date || '').localeCompare(a.tcg_date || ''))
-      .map(s => ({ id: s.set_name, name: `${s.set_name} (${s.set_code})`, total: s.num_of_cards, group: year(s.tcg_date) }));
+      .map(s => ({ id: s.set_name, name: `${s.set_name} (${s.set_code})`, total: s.num_of_cards, logo: s.set_image, group: year(s.tcg_date) }));
   })().catch(e => { delete setListCache[key]; throw e; });
   setListCache[key] = p;
+  return p;
+}
+
+// =============== CONTENU COMPLET D'UNE SÉRIE (vue « classeur ») ===============
+// Renvoie toutes les cartes d'une série, triées par numéro
+const binderCache = {};
+const byNumber = (a, b) => String(a.number).localeCompare(String(b.number), undefined, { numeric: true });
+export function setCards(game, lang, { setId, set }) {
+  const key = `${game}|${lang}|${setId || set}`;
+  if (binderCache[key]) return binderCache[key];
+  const p = (async () => {
+    if (game === 'pokemon') {
+      const s = await pokemonSetCards(lang, setId);
+      return (s?.cards || []).map(c => ({
+        game, apiId: c.id, lang, name: c.name, number: c.localId, set: s.name, setId: s.id,
+        setTotal: s.cardCount?.official, thumb: tcgdexImg(c.image, 'low'),
+      })).sort(byNumber);
+    }
+    if (game === 'mtg') {
+      const out = [];
+      let url = `${SCRY}/cards/search?unique=prints&order=set&q=${encodeURIComponent(`e:${setId}`)}`;
+      while (url && out.length < 1200) {
+        const d = await getJSON(url);
+        if (!d) break;
+        out.push(...d.data);
+        url = d.has_more ? d.next_page : null;
+      }
+      return out.map(c => mtgNorm(c, 'en')).sort(byNumber);
+    }
+    const d = await getJSON(`${YGO}/cardinfo.php?cardset=${encodeURIComponent(set)}`);
+    return (d?.data || []).flatMap(c => (c.card_sets || []).filter(x => x.set_name === set).map(s0 => ({
+      game, apiId: String(c.id), lang, name: c.name, number: s0.set_code, set, rarity: s0.set_rarity,
+      thumb: c.card_images?.[0]?.image_url_small || ygoImg(c.id, true), extra: { setCode: s0.set_code },
+    }))).sort(byNumber);
+  })().catch(e => { delete binderCache[key]; throw e; });
+  binderCache[key] = p;
   return p;
 }
 

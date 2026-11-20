@@ -1,5 +1,5 @@
 import { db } from './db.js';
-import { providers, market, fetchRate, marketLinks, GAMES, listSets, correctNames, warmDictionary } from './api.js';
+import { providers, market, fetchRate, marketLinks, GAMES, listSets, correctNames, warmDictionary, setCards, normNum } from './api.js';
 import { visualScores } from './match.js';
 import * as scanner from './scanner.js';
 import { t, setLang, getLang } from './i18n.js';
@@ -249,7 +249,7 @@ function deltaHTML() {
 function tileHTML(c) {
   const v = unitValue(c);
   return `<button class="tile" data-uid="${c.uid}">
-    <div class="tile-img ${isFoil(c) ? 'foil' : ''}">${thumbImg(c.thumb || c.image || c.photo, c.name)}
+    <div class="tile-img ${isFoil(c) ? 'foil' : ''} tier-${rarityTier(c)}">${thumbImg(c.thumb || c.image || c.photo, c.name)}
       ${(c.qty || 1) > 1 ? `<span class="qty">×${c.qty}</span>` : ''}
       ${c.grade ? `<span class="grade">${esc(c.grade)}</span>` : ''}
       <span class="game-tag" style="--g:${GAMES[c.game]?.color}">${GAMES[c.game]?.short}</span>
@@ -291,21 +291,10 @@ function sortCards(arr) {
   return arr.sort(by);
 }
 
-function renderList(list) {
-  const items = S.cards.filter(c => (c.list || 'collection') === list);
-  const total = sum(items, c => lineValue(c));
-  const count = sum(items, c => c.qty || 1);
-  const isCol = list === 'collection';
-  view.innerHTML = `
-    <section class="hero ${isCol ? '' : 'wish'}">
-      <div class="hero-top">
-        <div class="hero-label">${t(isCol ? 'collectionValue' : 'wishlistValue')}</div>
-        ${isCol ? `<button class="ghost-btn" id="refresh">${icon('refresh')}<span>${t('refresh')}</span></button>` : ''}
-      </div>
-      <div class="hero-value">${money(total)} ${isCol ? deltaHTML() : ''}</div>
-      <div class="hero-sub">${count} ${t(count > 1 ? 'cards' : 'card')} · ${new Set(items.map(c => c.setId || c.set)).size} ${t('sets')}${isCol ? ` · <span class="muted">${lastUpdateText()}</span>` : ''}</div>
-    </section>
-    ${items.length ? `
+// ---------- inventaire (liste filtrable) : utilisé par « Toutes mes cartes » et la liste d'envies
+function inventoryHTML(items, isCol) {
+  if (!items.length) return '<div id="grid"></div>';
+  return `
     <div class="toolbar">
       <label class="search">${icon('search')}<input id="q" type="search" placeholder="${t('searchCollection')}" value="${esc(S.filter.q)}" autocomplete="off"></label>
       <button class="icon-btn" id="toggle-view" aria-label="view">${icon(S.settings.view === 'grid' ? 'list' : 'grid')}</button>
@@ -317,13 +306,16 @@ function renderList(list) {
       <label class="chip select">${t('sortBy')}
         <select id="sort">${['value', 'recent', 'name', 'set', 'trend'].map(s => `<option value="${s}" ${S.settings.sort === s ? 'selected' : ''}>${t('sort_' + s)}</option>`).join('')}</select>
       </label>
-    </div>` : ''}
+    </div>
     <div id="grid"></div>`;
+}
 
-  const grid = $('#grid');
+function bindInventory(root, items, list) {
+  const isCol = list === 'collection';
+  const grid = $('#grid', root);
   const draw = () => {
     const q = S.filter.q.trim().toLowerCase();
-    let arr = items.filter(c =>
+    const arr = items.filter(c =>
       (S.filter.game === 'all' || c.game === S.filter.game)
       && (!S.filter.dupes || !isCol || (c.qty || 1) > 1)
       && (!q || `${c.name} ${c.set} ${c.number} ${c.rarity} ${c.notes || ''}`.toLowerCase().includes(q)));
@@ -334,26 +326,345 @@ function renderList(list) {
     else grid.innerHTML = arr.map(S.settings.view === 'grid' ? tileHTML : rowHTML).join('');
   };
   draw();
-
   grid.addEventListener('click', e => {
     const b = e.target.closest('[data-uid]');
     if (b) openCard(b.dataset.uid);
     if (e.target.closest('#empty-search')) openSearch({ list });
   });
-  $('#q')?.addEventListener('input', e => { S.filter.q = e.target.value; draw(); });
-  $$('.chip[data-game]').forEach(b => b.onclick = () => {
+  $('#q', root)?.addEventListener('input', e => { S.filter.q = e.target.value; draw(); });
+  $$('.chip[data-game]', root).forEach(b => b.onclick = () => {
     S.filter.game = b.dataset.game;
-    $$('.chip[data-game]').forEach(x => x.classList.toggle('on', x === b));
+    $$('.chip[data-game]', root).forEach(x => x.classList.toggle('on', x === b));
     draw();
   });
-  $('#dupes')?.addEventListener('click', e => { S.filter.dupes = !S.filter.dupes; e.currentTarget.classList.toggle('on', S.filter.dupes); draw(); });
-  $('#sort')?.addEventListener('change', e => { S.settings.sort = e.target.value; saveSettings(); draw(); });
-  $('#toggle-view')?.addEventListener('click', e => {
+  $('#dupes', root)?.addEventListener('click', e => { S.filter.dupes = !S.filter.dupes; e.currentTarget.classList.toggle('on', S.filter.dupes); draw(); });
+  $('#sort', root)?.addEventListener('change', e => { S.settings.sort = e.target.value; saveSettings(); draw(); });
+  $('#toggle-view', root)?.addEventListener('click', e => {
     S.settings.view = S.settings.view === 'grid' ? 'list' : 'grid';
     e.currentTarget.innerHTML = icon(S.settings.view === 'grid' ? 'list' : 'grid');
     saveSettings(); draw();
   });
-  $('#refresh')?.addEventListener('click', () => refreshAll());
+}
+
+function renderList(list) {
+  if (list === 'collection') return renderCollection();
+  const items = S.cards.filter(c => (c.list || 'collection') === list);
+  const total = sum(items, c => lineValue(c));
+  const count = sum(items, c => c.qty || 1);
+  view.innerHTML = `
+    <section class="hero wish">
+      <div class="hero-top"><div class="hero-label">${t('wishlistValue')}</div></div>
+      <div class="hero-value">${money(total)}</div>
+      <div class="hero-sub">${count} ${t(count > 1 ? 'cards' : 'card')} · ${new Set(items.map(c => c.setId || c.set)).size} ${t('sets')}</div>
+    </section>
+    ${inventoryHTML(items, false)}`;
+  bindInventory(view, items, list);
+}
+
+// ---------- regroupement par série
+const setKey = c => `${c.game}|${c.game === 'yugioh' ? (c.set || '') : (c.setId || c.set || '')}`;
+const setMeta = {}; // clé → { logo, total, name } complétés depuis les listes de séries
+
+function groupSets(items) {
+  const m = new Map();
+  for (const c of items) {
+    const k = setKey(c);
+    let g = m.get(k);
+    if (!g) m.set(k, g = { key: k, game: c.game, setId: c.setId, set: c.set, name: c.set || '—', logo: c.setLogo || null, total: c.setTotal || null, lang: c.lang, cards: [] });
+    g.cards.push(c);
+    if (!g.logo && c.setLogo) g.logo = c.setLogo;
+    if (!g.total && c.setTotal) g.total = c.setTotal;
+  }
+  for (const g of m.values()) {
+    const meta = setMeta[g.key];
+    if (meta) { g.logo = g.logo || meta.logo; g.total = g.total || meta.total; }
+    g.value = sum(g.cards, c => lineValue(c));
+    g.count = sum(g.cards, c => c.qty || 1);
+    const nums = new Set(g.cards.map(c => normNum(c.number)));
+    g.unique = nums.size;
+    g.mainOwned = g.total ? [...nums].filter(n => /^\d+$/.test(n) && +n >= 1 && +n <= g.total).length : g.unique;
+    g.extra = g.unique - g.mainOwned; // cartes « secrètes » au-delà du total officiel
+    g.pct = g.total ? Math.min(1, g.mainOwned / g.total) : null;
+    g.last = Math.max(...g.cards.map(c => c.addedAt || 0));
+    g.top = [...g.cards].sort((a, b) => (unitValue(b) || 0) - (unitValue(a) || 0)).slice(0, 3);
+  }
+  return [...m.values()];
+}
+
+// Complète logos / totaux manquants (MTG, Yu-Gi-Oh!, anciennes fiches) puis redessine
+async function enrichSets(groups, onDone) {
+  const missing = groups.filter(g => (!g.logo || !g.total) && !setMeta[g.key]);
+  if (!missing.length) return;
+  const games = [...new Set(missing.map(g => g.game))];
+  await Promise.all(games.map(async game => {
+    try {
+      const sets = await listSets(game, S.settings.cardLang);
+      missing.filter(g => g.game === game).forEach(g => {
+        const s = sets.find(x => x.id === (game === 'yugioh' ? g.set : g.setId));
+        setMeta[g.key] = s ? { logo: s.logo, total: s.total } : {};
+      });
+    } catch { /* hors ligne : on garde ce qu'on a */ }
+  }));
+  onDone();
+}
+
+const RARITY_TIERS = [
+  ['legend', /secr|hyper|gold|ultime|sp[ée]ciale|special illus|mythic|starlight|ghost|collector|quarter|platinum|shiny|chromatique|ace spec|magnifique/i],
+  ['epic', /ultra|double|illus|full art|vmax|vstar|\bgx\b|\bex\b|\bv\b|prism|super rare|ultimate|amazing|radieu|radiant/i],
+  ['rare', /rare|holo/i],
+];
+const rarityTier = c => (RARITY_TIERS.find(([, re]) => re.test(c.rarity || '')) || [''])[0];
+
+function ringSVG(pct, size = 64, stroke = 7) {
+  const r = (size - stroke) / 2, c = 2 * Math.PI * r;
+  const id = `rg${Math.random().toString(36).slice(2, 7)}`;
+  return `<svg class="ring" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">
+    <defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff7ac6"/><stop offset=".5" stop-color="#60a5fa"/><stop offset="1" stop-color="#34d399"/></linearGradient></defs>
+    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="rgba(255,255,255,.1)" stroke-width="${stroke}"/>
+    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="url(#${id})" stroke-width="${stroke}" stroke-linecap="round"
+      stroke-dasharray="${c * (pct || 0)} ${c}" transform="rotate(-90 ${size / 2} ${size / 2})" class="ring-arc"/>
+  </svg>`;
+}
+
+function countUp(el, to) {
+  const from = S.heroShown ?? 0;
+  S.heroShown = to;
+  if (Math.abs(to - from) < 0.01 || matchMedia('(prefers-reduced-motion: reduce)').matches) { el.textContent = money(to); return; }
+  const t0 = performance.now(), d = 1000;
+  const step = now => {
+    const p = Math.min(1, (now - t0) / d), e = 1 - Math.pow(1 - p, 3);
+    el.textContent = money(from + (to - from) * e);
+    if (p < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// ---------- onglet Collection
+function renderCollection() {
+  const items = S.cards.filter(inCollection);
+  if (!items.length) {
+    view.innerHTML = `<section class="hero"><div class="hero-label">${t('collectionValue')}</div><div class="hero-value">${money(0)}</div></section>${emptyHTML('collection')}`;
+    $('#empty-search')?.addEventListener('click', () => openSearch({}));
+    return;
+  }
+  const groups = groupSets(items);
+  const total = sum(items, c => lineValue(c));
+  const count = sum(items, c => c.qty || 1);
+  const complete = groups.filter(g => g.pct === 1).length;
+  const best = [...items].sort((a, b) => (unitValue(b) || 0) - (unitValue(a) || 0))[0];
+  const k = S.settings.currency === 'EUR' ? 'eur' : 'usd';
+  const hist = S.valueHistory.map(p => p[k]).filter(v => v != null).slice(-30);
+  if (S.colTab && S.colTab !== 'overview' && S.colTab !== 'all' && !groups.some(g => g.key === S.colTab)) S.colTab = 'overview';
+  S.colTab = S.colTab || 'overview';
+  const sortedTabs = [...groups].sort((a, b) => b.last - a.last);
+
+  view.innerHTML = `
+    <section class="hero hero-col">
+      <div class="hero-shine"></div>
+      <div class="hero-top">
+        <div class="hero-label">${t('collectionValue')}</div>
+        <button class="ghost-btn" id="refresh">${icon('refresh')}<span>${t('refresh')}</span></button>
+      </div>
+      <div class="hero-value"><span id="hero-num">${money(S.heroShown ?? 0)}</span> ${deltaHTML()}</div>
+      ${hist.length >= 2 ? `<div class="hero-spark">${sparkline(hist, { w: 300, h: 34, color: '#fff' })}</div>` : ''}
+      <div class="hero-stats">
+        <div><b>${count}</b><span>${t(count > 1 ? 'cards' : 'card')}</span></div>
+        <div><b>${groups.length}</b><span>${t('sets')}</span></div>
+        <div><b>${complete}</b><span>${t('completeShort')}</span></div>
+        <div class="gem"><b>${new Intl.NumberFormat(locale(), { style: 'currency', currency: S.settings.currency, notation: 'compact', maximumFractionDigits: 1 }).format(unitValue(best) || 0)}</b><span>${t('topCard')}</span></div>
+      </div>
+      <div class="hero-sub muted">${lastUpdateText()}</div>
+    </section>
+    <nav class="col-tabs" id="col-tabs">
+      <button class="col-tab ${S.colTab === 'overview' ? 'on' : ''}" data-tab="overview">${icon('sparkles')}${t('overview')}</button>
+      <button class="col-tab ${S.colTab === 'all' ? 'on' : ''}" data-tab="all">${icon('grid')}${t('allCards')}<em>${count}</em></button>
+      ${sortedTabs.map(g => `<button class="col-tab set ${S.colTab === g.key ? 'on' : ''} ${g.pct === 1 ? 'done' : ''}" data-tab="${esc(g.key)}" style="--g:${GAMES[g.game].color}">
+        ${g.logo ? `<img src="${esc(g.logo)}" alt="" onerror="this.remove()">` : '<i class="dot"></i>'}<span>${esc(g.name)}</span>
+        ${g.pct != null ? `<em>${Math.round(g.pct * 100)}%</em>` : `<em>${g.unique}</em>`}</button>`).join('')}
+    </nav>
+    <div id="col-content"></div>`;
+
+  countUp($('#hero-num'), total);
+  $('#refresh').onclick = () => refreshAll();
+  const tabs = $('#col-tabs');
+  tabs.onclick = e => {
+    const b = e.target.closest('[data-tab]');
+    if (!b) return;
+    S.colTab = b.dataset.tab;
+    $$('.col-tab', tabs).forEach(x => x.classList.toggle('on', x === b));
+    b.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    drawTab();
+  };
+  const drawTab = () => {
+    const box = $('#col-content');
+    box.className = 'tab-anim';
+    void box.offsetWidth; box.classList.add('in');
+    if (S.colTab === 'overview') renderOverview(box, groups, items);
+    else if (S.colTab === 'all') { box.innerHTML = inventoryHTML(items, true); bindInventory(box, items, 'collection'); }
+    else renderBinder(box, groups.find(g => g.key === S.colTab));
+  };
+  drawTab();
+  requestAnimationFrame(() => $('.col-tab.on', tabs)?.scrollIntoView({ inline: 'center', block: 'nearest' }));
+  enrichSets(groups, () => { if (S.route === 'collection' && !sheets.length) renderCollection(); });
+}
+
+function renderOverview(box, groups, items) {
+  const latest = [...items].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0)).slice(0, 12);
+  const sort = S.settings.setSort || 'recent';
+  const sorted = [...groups].sort({
+    recent: (a, b) => b.last - a.last,
+    value: (a, b) => b.value - a.value,
+    progress: (a, b) => (b.pct ?? -1) - (a.pct ?? -1),
+    name: (a, b) => a.name.localeCompare(b.name),
+  }[sort]);
+  box.innerHTML = `
+    <section class="ov-sec">
+      <div class="sec-head"><h3>${t('latestAdds')}</h3></div>
+      <div class="carousel">${latest.map((c, i) => `
+        <button class="car-card tier-${rarityTier(c)}" data-uid="${c.uid}" style="--i:${i}">
+          <div class="car-img ${isFoil(c) ? 'foil' : ''}">${thumbImg(c.thumb || c.image || c.photo, c.name)}</div>
+          <span class="car-name">${esc(c.name)}</span><span class="car-price">${money(unitValue(c))}</span>
+        </button>`).join('')}</div>
+    </section>
+    <section class="ov-sec">
+      <div class="sec-head"><h3>${t('mySets')}</h3>
+        <label class="chip select">${t('sortBy')}<select id="set-sort">${['recent', 'value', 'progress', 'name'].map(s => `<option value="${s}" ${sort === s ? 'selected' : ''}>${t('setSort_' + s)}</option>`).join('')}</select></label>
+      </div>
+      <div class="set-grid">${sorted.map((g, i) => `
+        <button class="set-tile ${g.pct === 1 ? 'done' : ''}" data-tab="${esc(g.key)}" style="--g:${GAMES[g.game].color};--i:${i}">
+          <div class="set-fan">${g.top.map((c, j) => `<div class="fan-card f${j} ${isFoil(c) ? 'foil' : ''}">${thumbImg(c.thumb || c.image || c.photo, '')}</div>`).join('')}</div>
+          <div class="set-body">
+            <div class="set-head">
+              ${g.logo ? `<img class="set-logo" src="${esc(g.logo)}" alt="" onerror="this.remove()">` : ''}
+              <span class="game-tag inline" style="--g:${GAMES[g.game].color}">${GAMES[g.game].short}</span>
+            </div>
+            <div class="set-title">${esc(g.name)}</div>
+            <div class="set-meta"><b>${money(g.value)}</b> · ${g.total ? `${g.mainOwned}/${g.total}${g.extra > 0 ? ` +${g.extra}` : ''}` : `${g.unique} ${t('cards')}`}</div>
+            ${g.pct != null ? `<div class="progress"><div style="width:${g.pct * 100}%"></div></div>` : ''}
+          </div>
+          ${g.pct === 1 ? `<span class="done-badge">${icon('check')}${t('completeBadge')}</span>` : ''}
+        </button>`).join('')}</div>
+    </section>`;
+  box.onclick = e => {
+    const c = e.target.closest('[data-uid]');
+    if (c) return openCard(c.dataset.uid);
+    const s = e.target.closest('[data-tab]');
+    if (s) $(`#col-tabs [data-tab="${CSS.escape(s.dataset.tab)}"]`)?.click();
+  };
+  $('#set-sort', box).onchange = e => { S.settings.setSort = e.target.value; saveSettings(); renderOverview(box, groups, items); };
+}
+
+// ---------- classeur d'une série : possédées, manquantes ou classeur complet
+function renderBinder(box, g) {
+  const mode = S.binderMode || 'all';
+  const owned = new Map();
+  g.cards.forEach(c => { const n = normNum(c.number); owned.set(n, [...(owned.get(n) || []), c]); });
+  const missingCount = g.total ? Math.max(0, g.total - g.mainOwned) : null;
+  box.innerHTML = `
+    <section class="set-hero" style="--g:${GAMES[g.game].color}">
+      <div class="set-hero-ring">${ringSVG(g.pct ?? 0, 92, 9)}<div class="ring-txt"><b>${g.pct != null ? Math.round(g.pct * 100) + '%' : g.unique}</b><span>${g.pct != null ? `${g.mainOwned}/${g.total}` : t('cards')}</span></div></div>
+      <div class="set-hero-info">
+        ${g.logo ? `<img class="set-hero-logo" src="${esc(g.logo)}" alt="" onerror="this.remove()">` : ''}
+        <h2>${esc(g.name)}</h2>
+        <div class="set-hero-stats">
+          <span><b>${money(g.value)}</b>${t('value')}</span>
+          <span><b>${g.count}</b>${t('cards')}</span>
+          ${missingCount != null ? `<span><b>${missingCount}</b>${t('missing')}</span>` : ''}
+          ${g.extra > 0 ? `<span><b>+${g.extra}</b>${t('secret')}</span>` : ''}
+        </div>
+      </div>
+      ${g.pct === 1 ? `<div class="set-complete">${icon('sparkles')}${t('setComplete')}</div>` : ''}
+    </section>
+    <div class="seg" id="binder-mode">
+      ${['owned', 'missing', 'all'].map(m => `<button data-m="${m}" class="${mode === m ? 'on' : ''}">${t('binder_' + m)}</button>`).join('')}
+    </div>
+    <div id="binder" class="binder"></div>`;
+
+  const out = $('#binder', box);
+  const ownedSlot = (cards, i) => {
+    const c = cards.slice().sort((a, b) => (unitValue(b) || 0) - (unitValue(a) || 0))[0];
+    const qty = sum(cards, x => x.qty || 1);
+    return `<button class="slot owned tier-${rarityTier(c)}" data-uid="${c.uid}" style="--i:${Math.min(i, 30)}">
+      <div class="slot-img ${isFoil(c) ? 'foil' : ''}">${thumbImg(c.thumb || c.image || c.photo, c.name)}${qty > 1 ? `<span class="qty">×${qty}</span>` : ''}</div>
+      <span class="slot-num">#${esc(c.number || '?')}</span><span class="slot-price">${money(unitValue(c))}</span>
+    </button>`;
+  };
+  const draw = async m => {
+    S.binderMode = m;
+    $$('#binder-mode button', box).forEach(b => b.classList.toggle('on', b.dataset.m === m));
+    if (m === 'owned') {
+      const list = [...owned.values()].sort((a, b) => String(a[0].number).localeCompare(String(b[0].number), undefined, { numeric: true }));
+      out.innerHTML = list.map(ownedSlot).join('');
+      return;
+    }
+    out.innerHTML = `<div class="loading-block small"><div class="spinner"></div><p class="muted">${t('binderLoading')}</p></div>`;
+    let all;
+    try { all = await setCards(g.game, g.lang || S.settings.cardLang, { setId: g.setId, set: g.set }); }
+    catch { out.innerHTML = `<p class="muted center">${t('binderError')}</p>`; return; }
+    if (S.binderMode !== m || !out.isConnected) return;
+    const slots = all.map(r => ({ r, mine: owned.get(normNum(r.number)) }));
+    const shown = m === 'missing' ? slots.filter(s => !s.mine) : slots;
+    if (!shown.length) { out.innerHTML = `<div class="empty small"><p>${t(m === 'missing' ? 'nothingMissing' : 'noMatch')}</p></div>`; return; }
+    out.innerHTML = shown.map((s, i) => s.mine ? ownedSlot(s.mine, i) : `
+      <button class="slot missing" data-miss="${all.indexOf(s.r)}" style="--i:${Math.min(i, 30)}">
+        <div class="slot-img">${thumbImg(s.r.thumb, s.r.name)}<span class="slot-add">${icon('plus')}</span></div>
+        <span class="slot-num">#${esc(s.r.number)}</span><span class="slot-name">${esc(s.r.name)}</span>
+      </button>`).join('');
+    out.onclick = e => {
+      const o = e.target.closest('[data-uid]');
+      if (o) return openCard(o.dataset.uid);
+      const miss = e.target.closest('[data-miss]');
+      if (miss) openAdd(all[+miss.dataset.miss], {});
+    };
+  };
+  out.onclick = e => { const o = e.target.closest('[data-uid]'); if (o) openCard(o.dataset.uid); };
+  $$('#binder-mode button', box).forEach(b => b.onclick = () => draw(b.dataset.m));
+  draw(mode);
+}
+
+// ---------- confettis (étapes de collection)
+function confetti(amount = 140) {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const cv = document.createElement('canvas');
+  cv.className = 'confetti';
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr;
+  document.body.appendChild(cv);
+  const ctx = cv.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const colors = ['#ff7ac6', '#a78bfa', '#60a5fa', '#34d399', '#fde047', '#fb923c', '#ffffff'];
+  const P = Array.from({ length: amount }, () => ({
+    x: innerWidth / 2 + (Math.random() - 0.5) * 80, y: innerHeight * 0.35,
+    vx: (Math.random() - 0.5) * 12, vy: -Math.random() * 13 - 4,
+    w: 6 + Math.random() * 6, h: 8 + Math.random() * 8, r: Math.random() * 6, vr: (Math.random() - 0.5) * 0.4,
+    c: colors[(Math.random() * colors.length) | 0],
+  }));
+  const t0 = performance.now();
+  const frame = now => {
+    const el = now - t0;
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    P.forEach(p => {
+      p.vy += 0.38; p.vx *= 0.99; p.x += p.vx; p.y += p.vy; p.r += p.vr;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.r);
+      ctx.globalAlpha = Math.max(0, 1 - el / 2600);
+      ctx.fillStyle = p.c; ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h * Math.abs(Math.cos(p.r * 2)));
+      ctx.restore();
+    });
+    if (el < 2600) requestAnimationFrame(frame); else cv.remove();
+  };
+  requestAnimationFrame(frame);
+}
+
+// Félicite quand une carte ajoutée ouvre une série ou franchit 25/50/75/100 %
+function celebrate(before, after, name) {
+  if (!after) return;
+  if (!before) { toast(`${icon('sparkles')} ${t('newSet')} <b>${esc(name)}</b>`, 'ok'); confetti(60); return; }
+  if (before.pct == null || after.pct == null) return;
+  const step = [1, 0.75, 0.5, 0.25].find(s => before.pct < s && after.pct >= s);
+  if (!step) return;
+  toast(`${icon('sparkles')} <b>${esc(name)}</b> : ${step === 1 ? t('setComplete') : `${step * 100} % ${t('reached')}`}`, 'ok');
+  confetti(step === 1 ? 220 : 120);
+  navigator.vibrate?.([30, 60, 30, 60, 60]);
 }
 
 function emptyHTML(list) {
@@ -790,11 +1101,14 @@ async function openAdd(r, { photo, list } = {}) {
   bindFields(body, c, () => { $('#price', body).innerHTML = priceHTML(c); refreshOwned(); });
 
   $('#add-btn', body).onclick = async () => {
+    const progressOf = () => (c.list === 'wishlist' ? null : groupSets(S.cards.filter(inCollection)).find(g => g.key === setKey(c)));
+    const before = progressOf();
     const o = owned();
     if (o) { o.qty = (o.qty || 1) + (c.qty || 1); if (c.purchase != null && o.purchase == null) o.purchase = c.purchase; await saveCard(o); }
     else { pushHistory(c); await saveCard(c); }
     navigator.vibrate?.([20, 40, 20]);
     toast(`${icon('check')} <b>${esc(c.name)}</b> ${t(c.list === 'wishlist' ? 'addedWish' : 'added')}`, 'ok');
+    if (c.list !== 'wishlist') celebrate(before, progressOf(), c.set || '');
     snapshotValue();
     closeSheets(sheets.length);
     if (S.route !== 'scan') go();
