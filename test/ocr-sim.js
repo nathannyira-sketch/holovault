@@ -37,16 +37,27 @@ export function simulate(img, { fill = 0.9, dx = 0.03, dy = -0.02, rot = 3, blur
   return out;
 }
 
-export async function run(opts = {}) {
-  const sc = await import('/js/scanner.js?v=' + Date.now());
-  const api = await import('/js/api.js?v=' + Date.now());
+// Chaîne complète : OCR → correction par dictionnaire → recherche → tri visuel
+export async function run(opts = {}, { setId } = {}) {
+  const v = Date.now();
+  const sc = await import('/js/scanner.js?v=' + v);
+  const api = await import('/js/api.js?v=' + v);
+  const mt = await import('/js/match.js?v=' + v);
   const res = [];
   for (const [url, game, expName, expNum] of CARDS) {
+    const id = url.split('/').slice(-3, -1).join('-'); // ex. swsh3-20
     const crop = simulate(await load(url), opts);
     const t0 = performance.now();
     const r = await sc.recognizeCard(crop, game);
-    const list = await api.providers.pokemon.search(r.name, { lang: 'fr', number: r.number, total: r.total, candidates: r.candidates });
-    res.push({ exp: `${expName} ${expNum}`, read: `${r.name} | ${r.number || ''}/${r.total || ''}`, cands: (r.candidates || []).join(','), top: list[0] ? `${list[0].name} ${list[0].number} (${list[0].set})` : '—', ms: Math.round(performance.now() - t0) });
+    const fixes = await api.correctNames(game, 'fr', [r.name, ...r.candidates].filter(Boolean), setId && id.split('-')[0]);
+    const query = fixes[0]?.query || r.name;
+    const candidates = [...new Set([...fixes.map(f => f.query), ...r.candidates])];
+    let list = await api.providers.pokemon.search(query, { lang: 'fr', number: r.number, total: r.total, candidates, setId: setId && id.split('-')[0] });
+    const vis = await mt.visualScores(list, sc.thumbnail(crop, 360));
+    list.forEach(x => { if (vis.has(x.apiId)) x.score += vis.get(x.apiId) * 8; });
+    list.sort((a, b) => b.score - a.score);
+    const pos = list.findIndex(x => x.apiId.replace(/-0+(\d)/, '-$1') === id.replace(/-0+(\d)/, '-$1'));
+    res.push({ exp: `${expName} ${expNum}`, read: `${r.name} | ${r.number || ''}/${r.total || ''}`, fixed: query, top: list[0] ? `${list[0].name} ${list[0].number} (${list[0].set})` : '—', exactRank: pos < 0 ? '—' : pos + 1, ms: Math.round(performance.now() - t0) });
   }
   return res;
 }

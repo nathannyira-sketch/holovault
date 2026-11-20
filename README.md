@@ -8,7 +8,9 @@ Aucune inscription, aucun serveur : la collection reste **uniquement sur ton té
 | | |
 |---|---|
 | 📷 **Scanner** | Cadre-guide, flash, import depuis la galerie. Lecture du nom + numéro (ex. `051/064`) directement sur le téléphone (OCR), puis identification de la bonne carte. |
-| 🔎 **Recherche manuelle** | Par nom (FR ou EN) + numéro, avec repli intelligent (accents, nom mal lu, numéro + taille de la série). |
+| 🧠 **Identification** | Meilleure image parmi 4 prises (netteté), 3 lectures croisées, correction des mots lus avec le dictionnaire des vrais noms de cartes, puis comparaison visuelle photo ↔ cartes pour trouver la bonne édition. |
+| 📌 **Série épinglée** | Choisis une série dans le menu et épingle-la : les scans suivants cherchent dedans (idéal pour ranger un booster ou un classeur). Même si le nom est illisible, la photo est comparée à toutes les cartes de la série. |
+| 🔎 **Recherche manuelle** | Par nom (FR ou EN), numéro et **série** (menu déroulant groupé par génération), ou parcours complet d'une série. |
 | 💶 **Prix du marché** | Cardmarket (€ : tendance, plus bas, moyennes 24 h / 7 j / 30 j) et TCGplayer ($). Verdict « en hausse / en baisse / stable », liens Cardmarket, TCGplayer et ventes eBay terminées. |
 | 📈 **Analyse** | Valeur totale, plus-value vs prix d'achat, tendance du marché 30 j de ta collection, historique jour par jour, plus fortes hausses/baisses, top 10, répartition par jeu et par rareté, progression des séries. |
 | 🗂️ **Archive** | Quantité, version (normale / holo / reverse / 1re éd.), état (NM → PO) avec décote automatique, gradation (PSA…), valeur perso, langue, notes, ta photo du scan. |
@@ -51,7 +53,8 @@ Puis **installe-la** :
 ## Conseils de scan
 - Bonne lumière, sans reflet (incline légèrement les cartes holo).
 - La carte doit remplir le cadre ; les zones pointillées montrent où l'appli lit le **nom** et le **numéro**.
-- Le résultat reste modifiable : corrige le nom si besoin, la bonne carte est marquée « N° identique ».
+- Le résultat reste modifiable : corrige le nom si besoin, la bonne carte est marquée « N° identique » ou « Ressemble le plus à ta photo ».
+- Pour scanner beaucoup de cartes d'une même série : choisis-la dans le menu des séries et touche 📌.
 
 ## Sources de données (gratuites, sans clé)
 - Pokémon : [TCGdex](https://tcgdex.dev) — prix Cardmarket & TCGplayer

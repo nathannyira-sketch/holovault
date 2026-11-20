@@ -27,6 +27,7 @@ const P = {
   sparkles: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15v4M17 17h4"/>',
   phone: '<rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+  pin: '<path d="M12 17v5M9 10.8V4h6v6.8l2.5 3.2h-11z"/>',
   file: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/>',
 };
 

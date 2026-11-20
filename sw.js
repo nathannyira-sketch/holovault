@@ -1,8 +1,8 @@
 // Service worker : appli utilisable hors ligne + cache des images de cartes
-const VERSION = 'holovault-v2';
+const VERSION = 'holovault-v3';
 const SHELL = [
   './', './index.html', './css/styles.css', './manifest.webmanifest',
-  './js/app.js', './js/api.js', './js/db.js', './js/i18n.js', './js/icons.js', './js/charts.js', './js/scanner.js',
+  './js/app.js', './js/api.js', './js/db.js', './js/i18n.js', './js/icons.js', './js/charts.js', './js/scanner.js', './js/match.js',
   './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png',
 ];
 const IMG_CACHE = 'holovault-img';

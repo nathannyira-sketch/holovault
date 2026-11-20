@@ -7,7 +7,7 @@ export async function startCamera(video) {
   stopCamera();
   const base = { facingMode: { ideal: 'environment' } };
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { ...base, width: { ideal: 2560 }, height: { ideal: 1440 } }, audio: false });
+    stream = await navigator.mediaDevices.getUserMedia({ video: { ...base, width: { ideal: 3840 }, height: { ideal: 2160 } }, audio: false });
   } catch {
     stream = await navigator.mediaDevices.getUserMedia({ video: base, audio: false });
   }
@@ -54,6 +54,36 @@ export function captureCard(video, guide) {
   c.width = Math.round(sw); c.height = Math.round(sh);
   c.getContext('2d').drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height);
   return c;
+}
+
+// Netteté d'une image (variance du laplacien sur une version réduite) : plus c'est haut, plus c'est net
+function sharpness(canvas) {
+  const w = 240, h = Math.round(canvas.height * (w / canvas.width));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(canvas, 0, 0, w, h);
+  const d = x.getImageData(0, 0, w, h).data;
+  const g = new Float32Array(w * h);
+  for (let i = 0, p = 0; p < w * h; i += 4, p++) g[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  let s = 0, s2 = 0, n = 0;
+  for (let y = 1; y < h - 1; y++) for (let xx = 1; xx < w - 1; xx++) {
+    const p = y * w + xx;
+    const l = 4 * g[p] - g[p - 1] - g[p + 1] - g[p - w] - g[p + w];
+    s += l; s2 += l * l; n++;
+  }
+  return s2 / n - (s / n) ** 2;
+}
+
+// Prend plusieurs images à la suite et garde la plus nette (main qui bouge, mise au point)
+export async function captureBest(video, guide, count = 4, gapMs = 110) {
+  let best = null, bestScore = -1;
+  for (let i = 0; i < count; i++) {
+    if (i) await new Promise(r => setTimeout(r, gapMs));
+    const c = captureCard(video, guide);
+    const s = sharpness(c);
+    if (s > bestScore) { bestScore = s; best = c; }
+  }
+  return best;
 }
 
 // Photo importée : recadrage centré au format carte (63x88)
@@ -203,7 +233,8 @@ export { prep as _prep }; // pour le banc d'essai (test/ocr-sim.js)
 // Passes retenues après comparatif sur photos simulées (voir test/ocr-sim.js) :
 // le nom ressort selon les cartes avec l'une OU l'autre, on combine donc les trois.
 const NAME_PASSES = [{ mode: 'adapt', psm: '6' }, { mode: 'adapt', psm: '11' }, { mode: 'raw', psm: '11' }];
-const NUM_PASSES = [{ mode: 'gray', psm: '11' }, { mode: 'adapt', psm: '11' }];
+// Numéro : lecture restreinte aux chiffres et « / » (bien plus fiable sur ce petit texte)
+const NUM_PASSES = [{ mode: 'gray', psm: '11', digits: true }, { mode: 'adapt', psm: '11', digits: true }, { mode: 'gray', psm: '11' }];
 
 // onStep(i, total) : avancement de la lecture
 export async function recognizeCard(canvas, game, onProgress, onStep) {
@@ -219,7 +250,7 @@ export async function recognizeCard(canvas, game, onProgress, onStep) {
     const pool = new Map();
     for (const { mode, psm } of NAME_PASSES) {
       onStep?.(++step, steps);
-      await worker.setParameters({ tessedit_pageseg_mode: psm });
+      await worker.setParameters({ tessedit_pageseg_mode: psm, tessedit_char_whitelist: '' });
       const img = prep(canvas, R.name, { width: 1300, mode });
       const r = await worker.recognize(img);
       debug.top.push({ mode: `${mode}/${psm}`, text: r.data.text, img: small(img) });
@@ -235,9 +266,10 @@ export async function recognizeCard(canvas, game, onProgress, onStep) {
 
     // NUMÉRO : on s'arrête dès qu'un « 051/064 » est lu
     let num = {};
-    for (const { mode, psm } of NUM_PASSES) {
+    for (const { mode, psm, digits } of NUM_PASSES) {
       onStep?.(++step, steps);
-      await worker.setParameters({ tessedit_pageseg_mode: psm });
+      const wl = digits && game !== 'yugioh' ? '0123456789/' : '';
+      await worker.setParameters({ tessedit_pageseg_mode: psm, tessedit_char_whitelist: wl });
       const img = prep(canvas, R.num, { width: 2000, mode });
       const r = await worker.recognize(img);
       debug.bottom.push({ mode: `${mode}/${psm}`, text: r.data.text, img: small(img) });

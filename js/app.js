@@ -1,5 +1,6 @@
 import { db } from './db.js';
-import { providers, market, fetchRate, marketLinks, GAMES } from './api.js';
+import { providers, market, fetchRate, marketLinks, GAMES, listSets, correctNames, warmDictionary } from './api.js';
+import { visualScores } from './match.js';
 import * as scanner from './scanner.js';
 import { t, setLang, getLang } from './i18n.js';
 import { lineChart, sparkline, donut, bars } from './charts.js';
@@ -10,7 +11,7 @@ const DEFAULTS = {
   uiLang: (navigator.language || 'fr').toLowerCase().startsWith('fr') ? 'fr' : 'en',
   cardLang: 'fr', currency: 'EUR', game: 'pokemon',
   condAdjust: true, autoRefresh: true, lastRefresh: 0,
-  rate: 0.91, view: 'grid', sort: 'value',
+  rate: 0.91, view: 'grid', sort: 'value', setLock: {},
 };
 const COND = { NM: 1, EX: 0.85, GD: 0.7, LP: 0.55, PL: 0.4, PO: 0.25 };
 const VARIANTS = ['normal', 'holo', 'reverse', 'first'];
@@ -368,6 +369,12 @@ function emptyHTML(list) {
 }
 
 // ---------------------------------------------------------------- SCANNER
+const lockedSet = game => S.settings.setLock?.[game] || null;
+function setLockChip() {
+  const l = lockedSet(S.settings.game);
+  return l ? `<button class="chip glass set-lock" id="unlock">${icon('cards')}<span>${esc(l.name)}</span>${icon('x')}</button>` : '';
+}
+
 async function renderScan() {
   const g = S.settings.game;
   view.innerHTML = `
@@ -380,6 +387,7 @@ async function renderScan() {
     </div></div>
     <div class="scan-top">
       <div class="seg glass" id="game-seg">${Object.keys(GAMES).map(k => `<button data-g="${k}" class="${g === k ? 'on' : ''}">${GAMES[k].label}</button>`).join('')}</div>
+      <div id="lock-slot">${setLockChip()}</div>
     </div>
     <div class="scan-hint" id="hint">${t('scanHint')}</div>
     <div class="scan-controls">
@@ -393,6 +401,7 @@ async function renderScan() {
 
   const video = $('#video');
   scanner.warmup();
+  warmDictionary(g, S.settings.cardLang);
   try {
     await scanner.startCamera(video);
     if (!scanner.hasTorch()) $('#torch').classList.add('disabled');
@@ -401,20 +410,32 @@ async function renderScan() {
     $('#hint').innerHTML = `${icon('info')} ${t(location.protocol === 'https:' || location.hostname === 'localhost' ? 'cameraError' : 'cameraHttps')}`;
   }
 
+  const bindLock = () => { const u = $('#unlock'); if (u) u.onclick = () => { delete S.settings.setLock[S.settings.game]; saveSettings(); $('#lock-slot').innerHTML = ''; }; };
+  bindLock();
   $$('#game-seg button').forEach(b => b.onclick = () => {
     S.settings.game = b.dataset.g; saveSettings();
     $$('#game-seg button').forEach(x => x.classList.toggle('on', x === b));
     $('.zone.num').className = `zone num ${b.dataset.g}`;
+    $('#lock-slot').innerHTML = setLockChip(); bindLock();
+    warmDictionary(b.dataset.g, S.settings.cardLang);
   });
   let torchOn = false;
   $('#torch').onclick = async () => { torchOn = !torchOn; if (await scanner.setTorch(torchOn)) $('#torch').classList.toggle('on', torchOn); };
   $('#manual').onclick = () => openSearch({ game: S.settings.game });
+  let shooting = false;
   $('#shutter').onclick = async () => {
+    if (shooting) return;
+    shooting = true;
     let canvas;
-    try { canvas = scanner.captureCard(video, $('#guide')); } catch { return toast(t('cameraNotReady'), 'warn'); }
+    try {
+      $('#hint').textContent = t('holdStill');
+      canvas = await scanner.captureBest(video, $('#guide'));
+    } catch { shooting = false; return toast(t('cameraNotReady'), 'warn'); }
+    $('#hint').textContent = t('scanHint');
     $('.scanner').classList.add('flash');
     setTimeout(() => $('.scanner')?.classList.remove('flash'), 250);
-    analyze(canvas);
+    await analyze(canvas);
+    shooting = false;
   };
   $('#file').onchange = async e => {
     const f = e.target.files[0];
@@ -426,12 +447,13 @@ async function renderScan() {
 
 async function analyze(canvas) {
   const busy = $('#busy'), txt = $('#busy-text');
+  const game = S.settings.game, lock = lockedSet(game);
   busy.hidden = false;
   navigator.vibrate?.(25);
   const photo = scanner.thumbnail(canvas, 360);
   let res = {};
   try {
-    res = await scanner.recognizeCard(canvas, S.settings.game, m => {
+    res = await scanner.recognizeCard(canvas, game, m => {
       if (!txt || m.status === 'recognizing text') return;
       if (m.progress != null) txt.textContent = `${t('loadingOcr')} ${Math.round(m.progress * 100)} %`;
     }, (i, n) => { if (txt) txt.textContent = `${t('analyzing')} ${i}/${n}`; });
@@ -439,28 +461,46 @@ async function analyze(canvas) {
     console.warn(e);
     toast(t('ocrFailed'), 'warn');
   }
+  // Correction des mots lus avec le dictionnaire des vrais noms de cartes
+  let fixes = [];
+  try {
+    if (txt) txt.textContent = t('matchingNames');
+    fixes = await correctNames(game, S.settings.cardLang, [res.name, ...(res.candidates || [])].filter(Boolean), lock?.id);
+  } catch { /* dictionnaire indisponible : on garde la lecture brute */ }
   busy.hidden = true;
-  openSearch({ game: S.settings.game, query: res.name || '', number: res.number || '', total: res.total || '', candidates: res.candidates || [], debug: res.debug, photo, fromScan: true });
+  const candidates = [...new Set([...fixes.map(f => f.query), ...(res.candidates || [])])];
+  openSearch({
+    game, query: fixes[0]?.query || res.name || '', number: res.number || '', total: res.total || '',
+    candidates, fixed: fixes.map(f => f.query), raw: res.name, debug: res.debug, photo, fromScan: true,
+  });
 }
 
 // ---------------------------------------------------------------- RECHERCHE
 function openSearch(o = {}) {
   let game = o.game || S.settings.game;
   let lang = S.settings.cardLang;
+  let setId = lockedSet(game)?.id || '';
+  let runId = 0;
+  const fixed = new Set(o.fixed || []);
   const body = openSheet(`
     <h2 class="sheet-title">${o.fromScan ? t('scanResult') : t('searchCard')}</h2>
     ${o.photo ? `<div class="scan-preview"><img src="${o.photo}" alt="">
       <div><div class="muted small">${t('detected')}</div>
       <div class="detected">${o.query ? esc(o.query) : `<span class="muted">${t('nothingRead')}</span>`}
       ${o.number ? `<span class="pill">#${esc(o.number)}${o.total ? '/' + esc(o.total) : ''}</span>` : ''}</div>
-      <div class="muted small">${t('detectedHelp')}</div></div></div>` : ''}
+      <div class="muted small">${o.raw && o.raw !== o.query ? `${t('readAs')} « ${esc(o.raw)} » · ` : ''}${t('detectedHelp')}</div></div></div>` : ''}
     ${o.candidates?.length > 1 ? `<div class="cand-row"><span class="muted small">${t('wordsRead')}</span>
-      ${o.candidates.map(c => `<button type="button" class="chip sm" data-cand="${esc(c)}">${esc(c)}</button>`).join('')}</div>` : ''}
+      ${o.candidates.slice(0, 8).map(c => `<button type="button" class="chip sm ${fixed.has(c) ? 'ok' : ''}" data-cand="${esc(c)}">${fixed.has(c) ? icon('check') : ''}${esc(c)}</button>`).join('')}</div>` : ''}
     ${o.debug ? `<details class="ocr-debug"><summary>${icon('info')} ${t('whatWasRead')}</summary>
       <p class="muted small">${t('debugHelp')} · ${esc(o.debug.size)} px</p>
       ${[...o.debug.top, ...o.debug.bottom].map(d => `<figure><img src="${d.img}" alt=""><figcaption>${esc(d.mode)} : ${esc(d.text.replace(/\s+/g, ' ').trim().slice(0, 140)) || '∅'}</figcaption></figure>`).join('')}
     </details>` : ''}
     <div class="seg" id="s-game">${Object.keys(GAMES).map(k => `<button type="button" data-g="${k}" class="${game === k ? 'on' : ''}">${GAMES[k].label}</button>`).join('')}</div>
+    <div class="set-row">
+      <label class="set-select">${icon('cards')}<select id="s-set"><option value="">${t('allSets')}</option></select></label>
+      <button type="button" class="icon-btn lock-btn" id="s-lock" aria-label="${t('lockSet')}" title="${t('lockSet')}">${icon('pin')}</button>
+    </div>
+    <div class="set-help muted small" id="s-set-help"></div>
     <form class="search-form" id="s-form">
       <label class="search">${icon('search')}<input name="q" value="${esc(o.query || '')}" placeholder="${t('cardName')}" autocomplete="off" enterkeyhint="search"></label>
       <input name="num" class="num-input" value="${esc(o.number || '')}" placeholder="${t('numberPh')}" autocomplete="off">
@@ -471,53 +511,128 @@ function openSearch(o = {}) {
       <button type="button" class="link ${lang === 'en' ? 'on' : ''}" data-l="en">EN</button></div>
     <div id="s-results" class="results"></div>`, { cls: 'tall' });
 
-  const form = $('#s-form', body), out = $('#s-results', body);
-  const run = async () => {
-    const q = form.q.value.trim(), num = form.num.value.trim();
-    if (!q && !num) { out.innerHTML = `<p class="muted center">${t('typeName')}</p>`; return; }
-    out.innerHTML = Array(5).fill('<div class="result skeleton"><div></div><div></div></div>').join('');
-    let list = [];
-    // tant que l'utilisateur n'a pas retouché le nom lu, on essaie aussi les autres mots lus sur la carte
-    const candidates = q === (o.query || '') ? (o.candidates || []) : [];
+  const form = $('#s-form', body), out = $('#s-results', body), sel = $('#s-set', body);
+
+  // --- menu des séries ---
+  const syncLockBtn = () => {
+    const locked = !!setId && lockedSet(game)?.id === setId;
+    $('#s-lock', body).classList.toggle('on', locked);
+    $('#s-lock', body).hidden = !setId;
+    $('#s-set-help', body).textContent = locked ? t('setLocked') : setId ? t('setChosen') : '';
+  };
+  const fillSets = async () => {
+    sel.innerHTML = `<option value="">${t('loadingSets')}</option>`;
     try {
-      list = await providers[game].search(q, { lang, number: num, total: o.total, candidates });
-      for (const c of candidates) {
-        if (list.length) break;
-        if (c !== q) list = await providers[game].search(c, { lang, number: num, total: o.total });
-      }
-    } catch (e) { out.innerHTML = `<p class="error center">${t('networkError')}</p>`; return; }
-    if (!list.length) {
-      const other = lang === 'fr' ? 'en' : 'fr';
-      out.innerHTML = `<div class="empty small"><p>${t('noResult')}</p>
-        <button class="btn ghost" id="try-other">${t('tryLang')} ${other.toUpperCase()}</button></div>`;
-      $('#try-other', out).onclick = () => { lang = other; syncLang(); run(); };
-      return;
-    }
-    out.innerHTML = list.map((r, i) => `
-      <button class="result ${r.numMatch ? 'match' : ''}" data-i="${i}">
+      const sets = await listSets(game, lang);
+      const groups = [];
+      sets.forEach(s => { let g = groups.find(x => x.name === s.group); if (!g) groups.push(g = { name: s.group, sets: [] }); g.sets.push(s); });
+      sel.innerHTML = `<option value="">${t('allSets')}</option>` + groups.map(g => `<optgroup label="${esc(g.name)}">${g.sets.map(s =>
+        `<option value="${esc(s.id)}" ${s.id === setId ? 'selected' : ''}>${esc(s.name)}${s.total ? ` · ${s.total}` : ''}</option>`).join('')}</optgroup>`).join('');
+      if (setId && sel.value !== setId) setId = '';
+    } catch { sel.innerHTML = `<option value="">${t('allSets')}</option>`; }
+    syncLockBtn();
+  };
+  sel.onchange = () => {
+    setId = sel.value;
+    if (lockedSet(game) && lockedSet(game).id !== setId) { delete S.settings.setLock[game]; saveSettings(); }
+    syncLockBtn();
+    run();
+  };
+  $('#s-lock', body).onclick = () => {
+    S.settings.setLock = S.settings.setLock || {};
+    if (lockedSet(game)?.id === setId) delete S.settings.setLock[game];
+    else S.settings.setLock[game] = { id: setId, name: sel.selectedOptions[0]?.textContent.split(' · ')[0] || setId };
+    saveSettings(); syncLockBtn();
+    const slot = $('#lock-slot'); if (slot) slot.innerHTML = setLockChip();
+    toast(t(lockedSet(game) ? 'setLockedToast' : 'setUnlockedToast'), 'ok');
+  };
+
+  // --- résultats ---
+  const resultHTML = (r, i) => `
+      <button class="result ${r.numMatch ? 'match' : ''} ${r.best ? 'best' : ''}" data-i="${i}">
         <div class="result-img">${thumbImg(r.thumb, r.name)}</div>
         <div class="result-main">
           <div class="tile-name">${esc(r.name)}</div>
           <div class="tile-sub">${esc(r.set || '')}</div>
           <div class="tile-sub">${r.number ? `#${esc(r.number)}${r.setTotal ? '/' + r.setTotal : ''}` : ''} ${r.rarity ? '· ' + esc(r.rarity) : ''}</div>
+          ${r.best ? `<div class="best-tag">${icon('sparkles')}${t('bestMatch')}</div>` : ''}
         </div>
         ${r.numMatch ? `<span class="badge-match">${icon('check')}${t('numberMatch')}</span>` : icon('plus', 'add-ic')}
-      </button>`).join('');
+      </button>`;
+  let list = [];
+  const draw = () => {
+    out.innerHTML = list.map(resultHTML).join('');
     out.onclick = e => {
       const b = e.target.closest('[data-i]');
       if (b) openAdd(list[+b.dataset.i], { photo: o.photo, list: o.list });
     };
   };
+  const run = async () => {
+    const id = ++runId;
+    const q = form.q.value.trim(), num = form.num.value.trim();
+    if (!q && !num && !setId) { out.innerHTML = `<p class="muted center">${t('typeName')}</p>`; return; }
+    out.innerHTML = Array(5).fill('<div class="result skeleton"><div></div><div></div></div>').join('');
+    // tant que l'utilisateur n'a pas retouché le nom lu, on essaie aussi les autres mots lus sur la carte
+    const candidates = q === (o.query || '') ? (o.candidates || []) : [];
+    let res = [];
+    try {
+      res = await providers[game].search(q, { lang, number: num, total: o.total, candidates, setId });
+      for (const c of candidates) {
+        if (res.length) break;
+        if (c !== q) res = await providers[game].search(c, { lang, number: num, total: o.total, setId });
+      }
+    } catch (e) { if (id === runId) out.innerHTML = `<p class="error center">${t('networkError')}</p>`; return; }
+    if (id !== runId) return;
+    list = res;
+    // Série choisie + photo, mais nom illisible : on compare la photo à TOUTES les cartes de la série
+    const weak = !list.length || (list[0].score ?? 0) < 4;
+    if (setId && o.photo && weak && game !== 'yugioh' && q === (o.query || '')) {
+      out.innerHTML = `<div class="loading-block small"><div class="spinner"></div><p class="muted">${t('visualSearch')}</p></div>`;
+      try {
+        const all = await providers[game].search('', { lang, setId });
+        const vis = await visualScores(all, o.photo, 400);
+        if (id !== runId) return;
+        if (vis.size) {
+          all.forEach(r => { r.vis = vis.get(r.apiId) ?? -1; r.score = r.vis * 8; });
+          all.sort((a, b) => b.vis - a.vis);
+          if (all[0].vis > 0.35) all[0].best = true;
+          list = all.slice(0, 30);
+          draw();
+          return;
+        }
+      } catch { /* on garde les résultats texte */ }
+    }
+    if (!list.length) {
+      const other = lang === 'fr' ? 'en' : 'fr';
+      out.innerHTML = `<div class="empty small"><p>${t('noResult')}</p>
+        <button class="btn ghost" id="try-other">${t('tryLang')} ${other.toUpperCase()}</button></div>`;
+      $('#try-other', out).onclick = () => { lang = other; syncLang(); fillSets(); run(); };
+      return;
+    }
+    draw();
+    // Comparaison visuelle avec la photo pour départager les éditions
+    if (o.photo && game !== 'yugioh') {
+      const vis = await visualScores(list, o.photo);
+      if (id !== runId || !vis.size) return;
+      list.forEach(r => { r.vis = vis.get(r.apiId); if (r.vis != null) r.score = (r.score || 0) + r.vis * 8; r.best = false; });
+      list.sort((a, b) => (b.score || 0) - (a.score || 0));
+      const top = list[0];
+      if (top?.vis != null && top.vis > 0.35) top.best = true;
+      draw();
+    }
+  };
   const syncLang = () => $$('.lang-row [data-l]', body).forEach(x => x.classList.toggle('on', x.dataset.l === lang));
   form.onsubmit = e => { e.preventDefault(); form.q.blur(); run(); };
   $$('#s-game button', body).forEach(b => b.onclick = () => {
     game = b.dataset.g;
+    setId = lockedSet(game)?.id || '';
     $$('#s-game button', body).forEach(x => x.classList.toggle('on', x === b));
-    run();
+    fillSets(); run();
   });
-  $$('.lang-row [data-l]', body).forEach(b => b.onclick = () => { lang = b.dataset.l; syncLang(); run(); });
+  $$('.lang-row [data-l]', body).forEach(b => b.onclick = () => { lang = b.dataset.l; syncLang(); fillSets(); run(); });
   $$('[data-cand]', body).forEach(b => b.onclick = () => { form.q.value = b.dataset.cand; run(); });
-  if (o.query || o.number) run(); else setTimeout(() => form.q.focus(), 350);
+  fillSets();
+  if (o.query || o.number || setId) run(); else setTimeout(() => form.q.focus(), 350);
 }
 
 // ---------------------------------------------------------------- AJOUT
