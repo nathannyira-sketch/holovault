@@ -505,6 +505,9 @@ function renderCollection() {
   };
   drawTab();
   requestAnimationFrame(() => $('.col-tab.on', tabs)?.scrollIntoView({ inline: 'center', block: 'nearest' }));
+  // Précharge en douceur la liste de chaque série possédée : les classeurs s'ouvriront sans attente
+  const idle = window.requestIdleCallback || (fn => setTimeout(fn, 800));
+  idle(() => sortedTabs.slice(0, 12).forEach(g => setCards(g.game, g.lang || S.settings.cardLang, { setId: g.setId, set: g.set }).catch(() => {})));
   enrichSets(groups, () => { if (S.route === 'collection' && !sheets.length) renderCollection(); });
 }
 
@@ -581,45 +584,65 @@ function renderBinder(box, g) {
     <div id="binder" class="binder"></div>`;
 
   const out = $('#binder', box);
-  const ownedSlot = (cards, i) => {
+  // Vignette légère : image décodée hors du fil principal, pas d'animation par carte
+  const img = (src, alt) => `<div class="ph">${icon('cards')}</div>${src ? `<img src="${esc(src)}" alt="${esc(alt)}" loading="lazy" decoding="async" onerror="this.remove()">` : ''}`;
+  const ownedSlot = cards => {
     const c = cards.slice().sort((a, b) => (unitValue(b) || 0) - (unitValue(a) || 0))[0];
     const qty = sum(cards, x => x.qty || 1);
-    return `<button class="slot owned tier-${rarityTier(c)}" data-uid="${c.uid}" style="--i:${Math.min(i, 30)}">
-      <div class="slot-img ${isFoil(c) ? 'foil' : ''}">${thumbImg(c.thumb || c.image || c.photo, c.name)}${qty > 1 ? `<span class="qty">×${qty}</span>` : ''}</div>
+    return `<button class="slot owned tier-${rarityTier(c)}" data-uid="${c.uid}">
+      <div class="slot-img ${isFoil(c) ? 'foil' : ''}">${img(c.thumb || c.image || c.photo, c.name)}${qty > 1 ? `<span class="qty">×${qty}</span>` : ''}</div>
       <span class="slot-num">#${esc(c.number || '?')}</span><span class="slot-price">${money(unitValue(c))}</span>
     </button>`;
   };
-  const draw = async m => {
+  const ownedSorted = () => [...owned.values()].sort((a, b) => String(a[0].number).localeCompare(String(b[0].number), undefined, { numeric: true }));
+  let all = null; // liste complète de la série, une fois chargée
+
+  // Le classeur est construit UNE SEULE FOIS ; changer de mode ne fait que masquer/afficher des vignettes
+  // (aucune image rechargée, aucun re-rendu : instantané même sur téléphone).
+  const setMode = m => {
     S.binderMode = m;
+    out.dataset.mode = m;
     $$('#binder-mode button', box).forEach(b => b.classList.toggle('on', b.dataset.m === m));
-    if (m === 'owned') {
-      const list = [...owned.values()].sort((a, b) => String(a[0].number).localeCompare(String(b[0].number), undefined, { numeric: true }));
-      out.innerHTML = list.map(ownedSlot).join('');
-      return;
-    }
-    out.innerHTML = `<div class="loading-block small"><div class="spinner"></div><p class="muted">${t('binderLoading')}</p></div>`;
-    let all;
-    try { all = await setCards(g.game, g.lang || S.settings.cardLang, { setId: g.setId, set: g.set }); }
-    catch { out.innerHTML = `<p class="muted center">${t('binderError')}</p>`; return; }
-    if (S.binderMode !== m || !out.isConnected) return;
-    const slots = all.map(r => ({ r, mine: owned.get(normNum(r.number)) }));
-    const shown = m === 'missing' ? slots.filter(s => !s.mine) : slots;
-    if (!shown.length) { out.innerHTML = `<div class="empty small"><p>${t(m === 'missing' ? 'nothingMissing' : 'noMatch')}</p></div>`; return; }
-    out.innerHTML = shown.map((s, i) => s.mine ? ownedSlot(s.mine, i) : `
-      <button class="slot missing" data-miss="${all.indexOf(s.r)}" style="--i:${Math.min(i, 30)}">
-        <div class="slot-img">${thumbImg(s.r.thumb, s.r.name)}<span class="slot-add">${icon('plus')}</span></div>
-        <span class="slot-num">#${esc(s.r.number)}</span><span class="slot-name">${esc(s.r.name)}</span>
-      </button>`).join('');
-    out.onclick = e => {
-      const o = e.target.closest('[data-uid]');
-      if (o) return openCard(o.dataset.uid);
-      const miss = e.target.closest('[data-miss]');
-      if (miss) openAdd(all[+miss.dataset.miss], {});
-    };
+    const empty = $('.binder-empty', out);
+    if (empty) empty.hidden = !(m === 'missing' && all && !all.some(r => !owned.has(normNum(r.number))));
+    if (!all && m !== 'owned') out.classList.add('waiting'); else out.classList.remove('waiting');
   };
-  out.onclick = e => { const o = e.target.closest('[data-uid]'); if (o) openCard(o.dataset.uid); };
-  $$('#binder-mode button', box).forEach(b => b.onclick = () => draw(b.dataset.m));
-  draw(mode);
+
+  // 1) tout de suite : les cartes possédées
+  out.innerHTML = ownedSorted().map(ownedSlot).join('')
+    + `<div class="binder-wait"><div class="spinner"></div><p class="muted">${t('binderLoading')}</p></div>`;
+  setMode(mode);
+
+  // 2) dès que la liste de la série arrive : le classeur complet (possédées + manquantes), dans l'ordre
+  setCards(g.game, g.lang || S.settings.cardLang, { setId: g.setId, set: g.set }).then(list => {
+    if (!out.isConnected) return;
+    all = list;
+    const seen = new Set();
+    const html = all.map((r, i) => {
+      const n = normNum(r.number);
+      const mine = owned.get(n);
+      if (mine) { seen.add(n); return ownedSlot(mine); }
+      return `<button class="slot missing" data-miss="${i}">
+        <div class="slot-img">${img(r.thumb, r.name)}<span class="slot-add">${icon('plus')}</span></div>
+        <span class="slot-num">#${esc(r.number)}</span><span class="slot-name">${esc(r.name)}</span>
+      </button>`;
+    }).join('');
+    // cartes possédées absentes de la liste officielle (numérotation différente, promo…)
+    const extra = ownedSorted().filter(cs => !seen.has(normNum(cs[0].number))).map(ownedSlot).join('');
+    out.innerHTML = html + extra + `<div class="empty small binder-empty" hidden><p>${t('nothingMissing')}</p></div>`;
+    setMode(S.binderMode);
+  }).catch(() => {
+    if (!out.isConnected) return;
+    $('.binder-wait', out)?.replaceWith(Object.assign(document.createElement('p'), { className: 'muted center binder-wait', textContent: t('binderError') }));
+  });
+
+  out.onclick = e => {
+    const o = e.target.closest('[data-uid]');
+    if (o) return openCard(o.dataset.uid);
+    const miss = e.target.closest('[data-miss]');
+    if (miss && all) openAdd(all[+miss.dataset.miss], {});
+  };
+  $$('#binder-mode button', box).forEach(b => b.onclick = () => setMode(b.dataset.m));
 }
 
 // ---------- confettis (étapes de collection)

@@ -214,15 +214,22 @@ body.refreshing .ghost-btn .ic { animation: spin 1s linear infinite; }
 @media (min-width: 560px) { .binder { grid-template-columns: repeat(4, 1fr); } }
 @media (min-width: 820px) { .binder { grid-template-columns: repeat(6, 1fr); } }
 .binder > .loading-block, .binder > p, .binder > .empty { grid-column: 1 / -1; }
-.slot { display: flex; flex-direction: column; gap: 3px; text-align: left; animation: rise 0.35s both; animation-delay: calc(var(--i) * 18ms); min-width: 0; }
+/* changement de mode = simple masquage CSS (aucun re-rendu) */
+.binder[data-mode="owned"] .slot.missing, .binder[data-mode="missing"] .slot.owned { display: none; }
+.binder .binder-wait { display: none; grid-column: 1 / -1; padding: 28px 0; text-align: center; place-items: center; gap: 10px; }
+.binder.waiting .binder-wait { display: grid; }
+.binder-empty[hidden] { display: none; }
+/* les vignettes hors écran ne sont ni dessinées ni mises en page */
+.slot { display: flex; flex-direction: column; gap: 3px; text-align: left; min-width: 0; content-visibility: auto; contain-intrinsic-size: auto 190px; }
 .slot-img { position: relative; aspect-ratio: 63 / 88; border-radius: 8px; overflow: hidden; background: #1e1b4b; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45); }
 .slot-img img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.slot-img.foil::after { content: ''; position: absolute; inset: 0; mix-blend-mode: color-dodge; opacity: 0.35; background: linear-gradient(115deg, transparent 20%, rgba(255, 122, 198, 0.6) 35%, rgba(96, 165, 250, 0.6) 45%, rgba(52, 211, 153, 0.6) 55%, transparent 70%); background-size: 250% 250%; animation: sheen 5s ease-in-out infinite; }
+/* reflet holo fixe dans le classeur (des centaines d'animations ralentissaient les téléphones) */
+.slot-img.foil::after { content: ''; position: absolute; inset: 0; pointer-events: none; opacity: 0.22; background: linear-gradient(115deg, transparent 25%, rgba(255, 122, 198, 0.7) 40%, rgba(96, 165, 250, 0.7) 50%, rgba(52, 211, 153, 0.7) 60%, transparent 75%); }
 .slot-num { font-size: 11px; font-weight: 700; color: var(--muted); }
 .slot-price { font-size: 12px; font-weight: 700; margin-top: -3px; }
 .slot-name { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: -3px; }
 .slot.missing .slot-img { background: rgba(255, 255, 255, 0.03); box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.12); }
-.slot.missing .slot-img img { filter: grayscale(1) brightness(0.45) contrast(0.9); opacity: 0.55; }
+.slot.missing .slot-img img { opacity: 0.22; } /* simple transparence : bien moins coûteux qu'un filtre gris */
 .slot.missing .ph { display: none; }
 .slot-add { position: absolute; right: 6px; bottom: 6px; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: rgba(139, 92, 246, 0.9); color: #fff; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); transform: scale(0.85); transition: transform 0.2s; }
 .slot-add .ic { width: 15px; height: 15px; }
@@ -231,7 +238,9 @@ body.refreshing .ghost-btn .ic { animation: spin 1s linear infinite; }
 /* ---------- lueur selon la rareté ---------- */
 .tier-rare.tile-img, .tier-rare .slot-img, .tier-rare .car-img { box-shadow: 0 0 0 1.5px rgba(96, 165, 250, 0.55), 0 8px 22px rgba(0, 0, 0, 0.4); }
 .tier-epic.tile-img, .tier-epic .slot-img, .tier-epic .car-img { box-shadow: 0 0 0 1.5px rgba(167, 139, 250, 0.8), 0 0 18px rgba(167, 139, 250, 0.35), 0 8px 22px rgba(0, 0, 0, 0.4); }
-.tier-legend.tile-img, .tier-legend .slot-img, .tier-legend .car-img { animation: legendGlow 2.8s ease-in-out infinite; }
+/* lueur dorée fixe partout ; pulsation animée réservée au carrousel (12 cartes max) */
+.tier-legend.tile-img, .tier-legend .slot-img { box-shadow: 0 0 0 1.5px rgba(253, 224, 71, 0.85), 0 0 16px rgba(253, 224, 71, 0.35), 0 8px 22px rgba(0, 0, 0, 0.4); }
+.tier-legend .car-img { animation: legendGlow 2.8s ease-in-out infinite; }
 @keyframes legendGlow {
   0%, 100% { box-shadow: 0 0 0 1.5px rgba(253, 224, 71, 0.85), 0 0 16px rgba(253, 224, 71, 0.35), 0 8px 22px rgba(0, 0, 0, 0.4); }
   50% { box-shadow: 0 0 0 1.5px rgba(255, 122, 198, 0.85), 0 0 26px rgba(255, 122, 198, 0.45), 0 8px 22px rgba(0, 0, 0, 0.4); }
