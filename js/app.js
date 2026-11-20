@@ -516,6 +516,10 @@ function renderCollection() {
   // Précharge en douceur la liste de chaque série possédée : les classeurs s'ouvriront sans attente
   const idle = window.requestIdleCallback || (fn => setTimeout(fn, 800));
   idle(() => sortedTabs.slice(0, 12).forEach(g => setCards(g.game, g.lang || S.settings.cardLang, { setId: g.setId, set: g.set }).catch(() => {})));
+  // Vérification des versions de toutes les cartes : une première fois automatiquement, puis chaque semaine
+  if (!S.auditing && navigator.onLine && (!S.settings.auditAt || Date.now() - S.settings.auditAt > 7 * 864e5)) {
+    setTimeout(() => auditVersions({ silent: !!S.settings.auditAt }), 1200);
+  }
   // ne redessine que si l'on est en haut de l'aperçu (jamais pendant que l'on fait défiler un classeur)
   enrichSets(groups, () => { if (S.route === 'collection' && !sheets.length && S.colTab === 'overview' && window.scrollY < 80) renderCollection(); });
 }
@@ -529,7 +533,10 @@ function renderOverview(box, groups, items) {
     progress: (a, b) => (b.pct ?? -1) - (a.pct ?? -1),
     name: (a, b) => a.name.localeCompare(b.name),
   }[sort]);
+  const flags = flaggedCards();
   box.innerHTML = `
+    ${flags.length ? `<button class="audit-banner" id="audit-open">${icon('info')}<span><b>${flags.length} ${t('auditBanner')}</b><em>${t('auditBannerHelp')}</em></span><i>›</i></button>`
+      : S.auditing ? `<div class="audit-banner soft">${icon('refresh', 'spin')}<span><b>${t('auditRunning')}…</b></span></div>` : ''}
     <section class="ov-sec">
       <div class="sec-head"><h3>${t('latestAdds')}</h3></div>
       <div class="carousel">${latest.map((c, i) => `
@@ -563,6 +570,7 @@ function renderOverview(box, groups, items) {
     const s = e.target.closest('[data-tab]');
     if (s) $(`#col-tabs [data-tab="${CSS.escape(s.dataset.tab)}"]`)?.click();
   };
+  $('#audit-open', box)?.addEventListener('click', e => { e.stopPropagation(); openReview(); });
   $('#set-sort', box).onchange = e => { S.settings.setSort = e.target.value; saveSettings(); renderOverview(box, groups, items); };
 }
 
@@ -1101,6 +1109,64 @@ function priceHTML(c) {
   </div>`;
 }
 
+// ---------------------------------------------------------------- VERSIONS D'UNE CARTE
+// Une même carte existe souvent en plusieurs versions dans une série (normale, illustration rare,
+// illustration spéciale, gold…) avec des prix très différents. Si la mauvaise version a été choisie,
+// la valeur affichée est fausse : on compare donc systématiquement avec les autres versions.
+const foldName = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+const versionsCache = new Map();
+const nmValue = d => unitValue({ ...d, variant: d.variant || defaultVariant(d), condition: 'NM', customValue: null, grade: null });
+
+function otherVersions(c) {
+  if (!['pokemon', 'mtg'].includes(c.game) || !c.setId) return Promise.resolve([]);
+  const key = `${c.game}|${c.apiId}|${c.lang}`;
+  if (!versionsCache.has(key)) {
+    versionsCache.set(key, (async () => {
+      const all = await setCards(c.game, c.lang || S.settings.cardLang, { setId: c.setId, set: c.set });
+      const myName = foldName(c.game === 'mtg' ? (c.altName || c.name) : c.name);
+      const same = all.filter(r => r.apiId !== c.apiId && normNum(r.number) !== normNum(c.number)
+        && foldName(c.game === 'mtg' ? (r.altName || r.name) : r.name) === myName).slice(0, 8);
+      const details = await Promise.all(same.map(r => providers[c.game].getDetails(r.apiId, r.lang || c.lang).catch(() => null)));
+      return details.filter(Boolean).map(d => ({ ...d, value: nmValue(d) })).sort((a, b) => (b.value || 0) - (a.value || 0));
+    })().catch(e => { versionsCache.delete(key); throw e; }));
+  }
+  return versionsCache.get(key);
+}
+
+// Une autre version vaut nettement plus que celle choisie ?
+function pricierVersion(c, versions) {
+  const best = versions[0];
+  if (!best?.value) return null;
+  const mine = nmValue(c) || 0;
+  return best.value >= 15 && best.value > mine * 3 ? best : null;
+}
+
+// Remplace la version d'une carte en gardant quantité, état, prix d'achat, notes, photo…
+function swapVersion(c, d) {
+  Object.assign(c, {
+    apiId: d.apiId, name: d.name, number: d.number, rarity: d.rarity, image: d.image, thumb: d.thumb,
+    artist: d.artist, setTotal: d.setTotal ?? c.setTotal, variantsAvailable: d.variantsAvailable,
+    pricingRaw: d.pricingRaw, variant: defaultVariant(d), priceUpdated: Date.now(), history: [], versionOk: true, versionConfirmed: true,
+  });
+  pushHistory(c);
+}
+
+function versionsHTML(c, versions, { review = false } = {}) {
+  if (!versions.length) return '';
+  const best = pricierVersion(c, versions);
+  return `<section class="versions">
+    ${best && !c.versionOk ? `<div class="v-warn">${icon('info')}<div><b>${t('versionWarnTitle')}</b>
+      <span>${t('versionWarnText').replace('{r}', esc(best.rarity || '')).replace('{n}', esc(best.number)).replace('{p}', money(best.value))}</span></div></div>` : ''}
+    <div class="v-head">${t('otherVersions')}</div>
+    ${versions.map((d, i) => `<div class="v-row">
+      <div class="v-img">${thumbImg(d.thumb || d.image, d.name)}</div>
+      <div class="v-main"><b>${esc(d.name)}</b><span>#${esc(d.number)}${d.setTotal ? '/' + d.setTotal : ''} · ${esc(d.rarity || '—')}</span></div>
+      <div class="v-side"><b>${money(d.value)}</b><button type="button" class="chip sm" data-swap="${i}">${t('thisIsMine')}</button></div>
+    </div>`).join('')}
+    ${best && !c.versionOk && review ? `<button type="button" class="btn ghost block" data-confirm>${icon('check')}${t('keepThisVersion')}</button>` : ''}
+  </section>`;
+}
+
 async function openAdd(r, { photo, list } = {}) {
   const body = openSheet(`<div class="loading-block"><div class="spinner"></div><p class="muted">${t('loadingCard')}</p></div>`, { cls: 'tall' });
   let d;
@@ -1109,7 +1175,9 @@ async function openAdd(r, { photo, list } = {}) {
   const c = { uid: newId(), ...d, qty: 1, condition: 'NM', variant: defaultVariant(d), list: list || 'collection', purchase: null, addedAt: Date.now(), photo: photo || null, history: [] };
 
   const owned = () => S.cards.find(x => x.game === c.game && x.apiId === c.apiId && (x.variant || 'normal') === c.variant && x.condition === c.condition && (x.list || 'collection') === c.list && x.number === c.number);
-  body.innerHTML = `
+  let pricierFlag = false; // une version plus chère existe et l'utilisateur garde celle-ci
+  const render = () => {
+    body.innerHTML = `
     <div class="detail-head">
       ${cardVisual(c, 'md')}
       <div class="detail-info">
@@ -1121,23 +1189,46 @@ async function openAdd(r, { photo, list } = {}) {
       </div>
     </div>
     <div id="price">${priceHTML(c)}</div>
+    <div id="versions"></div>
     ${fieldsHTML(c, { isNew: true })}
     <div class="sticky-actions"><button class="btn primary block" id="add-btn">${icon('plus')}<span>${t('add')}</span></button></div>`;
-  bindTilt(body);
+    bindTilt(body);
+    refreshOwned();
+    bindFields(body, c, () => { $('#price', body).innerHTML = priceHTML(c); refreshOwned(); });
+    $('#add-btn', body).onclick = add;
+    // Autres versions de cette carte dans la série (pour éviter de garder la version la moins chère par erreur)
+    otherVersions(c).then(vs => {
+      if (!body.isConnected || !vs.length) return;
+      pricierFlag = !!pricierVersion(c, vs) && !c.versionOk;
+      if (!pricierFlag) c.versionOk = true;
+      const box = $('#versions', body);
+      box.innerHTML = versionsHTML(c, vs);
+      box.onclick = e => {
+        const s = e.target.closest('[data-swap]');
+        if (!s) return;
+        const prev = { ...c };
+        swapVersion(c, vs[+s.dataset.swap]);
+        versionsCache.set(`${c.game}|${c.apiId}|${c.lang}`, Promise.resolve([{ ...prev, value: nmValue(prev) }, ...vs.filter((_, i) => i !== +s.dataset.swap)].sort((a, b) => (b.value || 0) - (a.value || 0))));
+        render();
+        body.scrollTo({ top: 0, behavior: 'smooth' });
+      };
+    }).catch(() => {});
+  };
   const refreshOwned = () => {
     const o = owned();
     $('#owned', body).innerHTML = o ? `<span class="pill ok">${icon('check')}${t('alreadyOwned')} ×${o.qty || 1}</span>` : '';
     $('#add-btn span', body).textContent = c.list === 'wishlist' ? t('addWish') : o ? t('addOneMore') : t('add');
   };
-  refreshOwned();
-  bindFields(body, c, () => { $('#price', body).innerHTML = priceHTML(c); refreshOwned(); });
 
-  $('#add-btn', body).onclick = async () => {
+  const add = async () => {
     const progressOf = () => (c.list === 'wishlist' ? null : groupSets(S.cards.filter(inCollection)).find(g => g.key === setKey(c)));
     const before = progressOf();
     const o = owned();
     if (o) { o.qty = (o.qty || 1) + (c.qty || 1); if (c.purchase != null && o.purchase == null) o.purchase = c.purchase; await saveCard(o); }
-    else { pushHistory(c); await saveCard(c); }
+    else {
+      pushHistory(c); await saveCard(c);
+      if (pricierFlag && c.list !== 'wishlist') { S.settings.versionFlags = [...(S.settings.versionFlags || []), c.uid]; saveSettings(); }
+    }
     navigator.vibrate?.([20, 40, 20]);
     toast(`${icon('check')} <b>${esc(c.name)}</b> ${t(c.list === 'wishlist' ? 'addedWish' : 'added')}`, 'ok');
     if (c.list !== 'wishlist') celebrate(before, progressOf(), c.set || '');
@@ -1145,16 +1236,18 @@ async function openAdd(r, { photo, list } = {}) {
     closeSheets(sheets.length);
     if (S.route !== 'scan') rerender();
   };
+  render();
 }
 
 // ---------------------------------------------------------------- FICHE CARTE
-function openCard(id) {
+function openCard(id, { review = false } = {}) {
   const c = S.cards.find(x => x.uid === id);
   if (!c) return;
   let dirty = false; // on ne redessine la page à la fermeture que si la carte a changé
   const body = openSheet('', { cls: 'tall', onClose: () => { if (dirty && S.route !== 'scan') rerender(); } });
-  const links = marketLinks(c);
-  body.innerHTML = `
+  const fill = () => {
+    const links = marketLinks(c);
+    body.innerHTML = `
     <div class="detail-head">
       ${cardVisual(c, 'md')}
       <div class="detail-info">
@@ -1166,7 +1259,8 @@ function openCard(id) {
         <div class="muted small">${t('addedOn')} ${new Date(c.addedAt).toLocaleDateString(locale())}</div>
       </div>
     </div>
-    ${c.photo && c.image ? `<details class="my-photo"><summary>${icon('image')} ${t('myScan')}</summary><img src="${c.photo}" alt=""></details>` : ''}
+    ${c.photo && c.image ? `<details class="my-photo" ${review ? 'open' : ''}><summary>${icon('image')} ${t('myScan')}</summary><img src="${c.photo}" alt=""></details>` : ''}
+    <div id="versions"></div>
     <div id="price">${priceHTML(c)}</div>
     <div class="links">${links.map(l => `<a class="chip" href="${l.url}" target="_blank" rel="noopener">${l.label}${icon('external')}</a>`).join('')}</div>
     ${fieldsHTML(c)}
@@ -1176,38 +1270,168 @@ function openCard(id) {
       <button class="btn ghost" id="c-move">${icon(c.list === 'wishlist' ? 'cards' : 'heart')}${t(c.list === 'wishlist' ? 'moveToCollection' : 'moveToWishlist')}</button>
       <button class="btn danger" id="c-del">${icon('trash')}${t('delete')}</button>
     </div>`;
-  bindTilt(body);
-  bindFields(body, c, async () => { dirty = true; $('#price', body).innerHTML = priceHTML(c); await saveCard(c); });
+    bindTilt(body);
+    bindFields(body, c, async () => { dirty = true; $('#price', body).innerHTML = priceHTML(c); await saveCard(c); });
 
-  $('#c-refresh', body).onclick = async e => {
-    const b = e.currentTarget; b.classList.add('loading');
-    try {
-      const d = await providers[c.game].getDetails(c.apiId, c.lang, { setCode: c.number });
-      c.pricingRaw = d.pricingRaw; c.priceUpdated = Date.now();
-      pushHistory(c); await saveCard(c); dirty = true;
-      $('#price', body).innerHTML = priceHTML(c);
-      toast(t('priceUpdated'), 'ok');
-    } catch { toast(t('networkError'), 'warn'); }
-    b.classList.remove('loading');
+    // Autres versions (avec alerte si une version plus rare et plus chère existe)
+    otherVersions(c).then(vs => {
+      if (!body.isConnected || !vs.length) return;
+      const box = $('#versions', body);
+      const draw = () => { box.innerHTML = versionsHTML(c, vs, { review: true }); };
+      draw();
+      box.onclick = async e => {
+        const s = e.target.closest('[data-swap]');
+        if (s) {
+          const i = +s.dataset.swap, prev = { ...c };
+          swapVersion(c, vs[i]);
+          await saveCard(c); snapshotValue(); dirty = true;
+          clearVersionFlag(c.uid);
+          versionsCache.set(`${c.game}|${c.apiId}|${c.lang}`, Promise.resolve([{ ...prev, value: nmValue(prev) }, ...vs.filter((_, j) => j !== i)].sort((a, b) => (b.value || 0) - (a.value || 0))));
+          toast(`${icon('check')} ${t('versionChanged')} #${esc(c.number)} · ${money(unitValue(c))}`, 'ok');
+          fill();
+          body.scrollTo({ top: 0, behavior: 'smooth' });
+          return;
+        }
+        if (e.target.closest('[data-confirm]')) {
+          c.versionOk = true; c.versionConfirmed = true; await saveCard(c); dirty = true;
+          clearVersionFlag(c.uid);
+          draw();
+          toast(t('versionKept'), 'ok');
+        }
+      };
+    }).catch(() => {});
+
+    $('#c-refresh', body).onclick = async e => {
+      const b = e.currentTarget; b.classList.add('loading');
+      try {
+        const d = await providers[c.game].getDetails(c.apiId, c.lang, { setCode: c.number });
+        c.pricingRaw = d.pricingRaw; c.priceUpdated = Date.now();
+        pushHistory(c); await saveCard(c); dirty = true;
+        $('#price', body).innerHTML = priceHTML(c);
+        toast(t('priceUpdated'), 'ok');
+      } catch { toast(t('networkError'), 'warn'); }
+      b.classList.remove('loading');
+    };
+    $('#c-share', body).onclick = async () => {
+      const text = `${c.name} — ${c.set || ''} #${c.number || ''} · ${t('estValue')} ${money(unitValue(c))}`;
+      if (navigator.share) navigator.share({ title: c.name, text, url: links[0].url }).catch(() => {});
+      else { await navigator.clipboard?.writeText(`${text}\n${links[0].url}`); toast(t('copied'), 'ok'); }
+    };
+    $('#c-move', body).onclick = async () => {
+      c.list = c.list === 'wishlist' ? 'collection' : 'wishlist';
+      await saveCard(c); snapshotValue(); dirty = true;
+      toast(t(c.list === 'wishlist' ? 'movedWish' : 'movedCol'), 'ok');
+      closeSheet();
+    };
+    $('#c-del', body).onclick = async () => {
+      if (!confirm(t('confirmDelete').replace('{n}', c.name))) return;
+      S.cards = S.cards.filter(x => x.uid !== c.uid);
+      await db.del(c.uid); snapshotValue(); dirty = true;
+      clearVersionFlag(c.uid);
+      toast(t('deleted'));
+      closeSheet();
+    };
   };
-  $('#c-share', body).onclick = async () => {
-    const text = `${c.name} — ${c.set || ''} #${c.number || ''} · ${t('estValue')} ${money(unitValue(c))}`;
-    if (navigator.share) navigator.share({ title: c.name, text, url: links[0].url }).catch(() => {});
-    else { await navigator.clipboard?.writeText(`${text}\n${links[0].url}`); toast(t('copied'), 'ok'); }
+  fill();
+}
+
+// ---------------------------------------------------------------- VÉRIFICATION DE TOUTE LA COLLECTION
+// Passe en revue chaque carte : existe-t-il, dans la même série, une version au même nom qui vaut bien plus ?
+// Les cartes suspectes sont listées pour que tu confirmes ou remplaces la version.
+async function auditVersions({ silent = false } = {}) {
+  if (S.auditing) return;
+  const cards = S.cards.filter(c => inCollection(c) && ['pokemon', 'mtg'].includes(c.game) && c.setId && !c.versionOk);
+  S.auditing = true;
+  const tt = silent ? null : toast(`${icon('refresh', 'spin')} ${t('auditRunning')}…`);
+  tt?.keep();
+  const flagged = [];
+  let done = 0;
+  const queue = [...cards];
+  const worker = async () => {
+    while (queue.length) {
+      const c = queue.shift();
+      try {
+        const vs = await otherVersions(c);
+        if (pricierVersion(c, vs)) flagged.push(c.uid);
+        else { c.versionOk = true; await db.put(c); } // aucune version plus chère : carte validée
+      } catch { /* hors ligne : on réessaiera */ }
+      done++;
+      tt?.update(`${icon('refresh', 'spin')} ${t('auditRunning')} ${done}/${cards.length}`);
+    }
   };
-  $('#c-move', body).onclick = async () => {
-    c.list = c.list === 'wishlist' ? 'collection' : 'wishlist';
-    await saveCard(c); snapshotValue(); dirty = true;
-    toast(t(c.list === 'wishlist' ? 'movedWish' : 'movedCol'), 'ok');
-    closeSheet();
+  await Promise.all([worker(), worker(), worker()]);
+  S.settings.versionFlags = [...new Set([...(S.settings.versionFlags || []).filter(uid => S.cards.some(c => c.uid === uid && !c.versionOk)), ...flagged])];
+  S.settings.auditAt = Date.now();
+  await saveSettings();
+  S.auditing = false;
+  tt?.close();
+  if (!silent) toast(flagged.length ? `${icon('info')} ${flagged.length} ${t('auditFound')}` : `${icon('check')} ${t('auditClean')}`, flagged.length ? 'warn' : 'ok');
+  if (S.route === 'collection' && !sheets.length && window.scrollY < 80) rerender();
+  return flagged;
+}
+
+function clearVersionFlag(uid) {
+  if (!S.settings.versionFlags?.includes(uid)) return;
+  S.settings.versionFlags = S.settings.versionFlags.filter(x => x !== uid);
+  saveSettings();
+}
+
+function flaggedCards() {
+  return (S.settings.versionFlags || []).map(uid => S.cards.find(c => c.uid === uid)).filter(c => c && !c.versionOk);
+}
+
+// Liste des cartes à vérifier : version actuelle ↔ version plus chère, remplacement en un tap
+async function openReview() {
+  const body = openSheet(`<h2 class="sheet-title">${t('reviewTitle')}</h2><p class="muted small">${t('reviewHelp')}</p><div id="rv-list"><div class="loading-block small"><div class="spinner"></div></div></div>`, { cls: 'tall', onClose: () => rerender() });
+  const list = $('#rv-list', body);
+  const draw = async () => {
+    const cards = flaggedCards();
+    if (!cards.length) { list.innerHTML = `<div class="empty small"><p>${t('auditClean')} 🎉</p></div>`; return; }
+    const rows = await Promise.all(cards.map(async c => ({ c, vs: await otherVersions(c).catch(() => []) })));
+    list.innerHTML = rows.map(({ c, vs }) => {
+      const best = pricierVersion(c, vs) || vs[0];
+      if (!best) return '';
+      return `<div class="rv-card" data-uid="${c.uid}">
+        <div class="rv-pair">
+          <button class="rv-side" data-open="${c.uid}">
+            <div class="rv-img">${thumbImg(c.photo || c.thumb || c.image, c.name)}</div>
+            <span class="rv-lbl">${t(c.photo ? 'myScan' : 'current')}</span>
+          </button>
+          <div class="rv-mid">
+            <b>${esc(c.name)}</b><span class="muted small">${esc(c.set || '')}</span>
+            <div class="rv-cmp"><span>#${esc(c.number)} · ${esc(c.rarity || '—')}</span><b>${money(nmValue(c))}</b></div>
+            <div class="rv-arrow">↓</div>
+            <div class="rv-cmp best"><span>#${esc(best.number)} · ${esc(best.rarity || '—')}</span><b>${money(best.value)}</b></div>
+          </div>
+          <div class="rv-side"><div class="rv-img">${thumbImg(best.thumb || best.image, best.name)}</div><span class="rv-lbl">${t('pricierVersion')}</span></div>
+        </div>
+        <div class="rv-actions">
+          <button class="btn ghost" data-keep="${c.uid}">${icon('check')}${t('keepThisVersion')}</button>
+          <button class="btn primary" data-swapto="${c.uid}">${t('replaceWith')} #${esc(best.number)}</button>
+        </div>
+      </div>`;
+    }).join('');
+    list.onclick = async e => {
+      const open = e.target.closest('[data-open]');
+      if (open) return openCard(open.dataset.open, { review: true });
+      const keep = e.target.closest('[data-keep]'), sw = e.target.closest('[data-swapto]');
+      const uid = (keep || sw)?.dataset.keep || (keep || sw)?.dataset.swapto;
+      if (!uid) return;
+      const c = S.cards.find(x => x.uid === uid);
+      if (sw) {
+        const vs = await otherVersions(c);
+        const best = pricierVersion(c, vs) || vs[0];
+        if (best) swapVersion(c, best);
+        toast(`${icon('check')} ${esc(c.name)} → #${esc(c.number)} · ${money(unitValue(c))}`, 'ok');
+      } else { c.versionOk = true; c.versionConfirmed = true; toast(t('versionKept'), 'ok'); }
+      await saveCard(c);
+      clearVersionFlag(uid);
+      snapshotValue();
+      $(`.rv-card[data-uid="${CSS.escape(uid)}"]`, list)?.remove();
+      if (!$('.rv-card', list)) draw();
+    };
   };
-  $('#c-del', body).onclick = async () => {
-    if (!confirm(t('confirmDelete').replace('{n}', c.name))) return;
-    S.cards = S.cards.filter(x => x.uid !== c.uid);
-    await db.del(c.uid); snapshotValue(); dirty = true;
-    toast(t('deleted'));
-    closeSheet();
-  };
+  draw();
 }
 
 // ---------------------------------------------------------------- STATS
@@ -1348,6 +1572,7 @@ function renderSettings() {
     <section class="panel settings">
       <div class="panel-head"><h3>${t('data')}</h3><span class="muted small">${S.cards.length} ${t('entries')}</span></div>
       <button class="set-btn" id="refresh-all">${icon('refresh')}<span>${t('refreshAll')}<em>${lastUpdateText()}</em></span></button>
+      <button class="set-btn" id="audit">${icon('search')}<span>${t('auditAll')}<em>${t('auditAllHelp')}</em></span></button>
       <button class="set-btn" id="share-col">${icon('share')}<span>${t('shareCollection')}<em>${t('shareCollectionHelp')}</em></span></button>
       <button class="set-btn" id="export">${icon('download')}<span>${t('exportJson')}<em>${t('exportJsonHelp')}</em></span></button>
       <label class="set-btn">${icon('upload')}<span>${t('importJson')}<em>${t('importJsonHelp')}</em></span><input type="file" id="import" accept=".json,application/json" hidden></label>
@@ -1369,6 +1594,12 @@ function renderSettings() {
   $$('input[data-setting]').forEach(i => i.onchange = async () => { S.settings[i.dataset.setting] = i.checked; await saveSettings(); });
   $('#install')?.addEventListener('click', async () => { installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; renderSettings(); });
   $('#refresh-all').onclick = () => refreshAll();
+  $('#audit').onclick = async () => {
+    // relance complète : on ré-examine aussi les cartes déjà validées automatiquement (pas celles confirmées à la main)
+    S.cards.forEach(c => { if (c.versionOk && !c.versionConfirmed) c.versionOk = false; });
+    const found = await auditVersions();
+    if (found?.length) openReview();
+  };
   $('#export').onclick = () => download(`holovault-${dateStamp()}.json`, JSON.stringify(exportData(), null, 1), 'application/json');
   $('#export-csv').onclick = () => download(`holovault-${dateStamp()}.csv`, toCSV(), 'text/csv');
   $('#share-col').onclick = shareCollection;
