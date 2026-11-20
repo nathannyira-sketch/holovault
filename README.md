@@ -63,6 +63,11 @@ Puis **installe-la** :
 - Yu-Gi-Oh! : [YGOPRODeck](https://ygoprodeck.com/api-guide/)
 - Taux de change : Frankfurter (BCE)
 
+**Fiabilité des prix.** Pour les séries récentes, TCGdex rattache souvent les versions rares (illustration rare,
+illustration spéciale, hyper rare…) au produit Cardmarket de la version standard (ex. Méga-Rayquaza-ex 138/103
+affiché à 2,93 €). L'appli détecte ces cas (produit Cardmarket partagé entre versions, ou écart énorme avec
+TCGplayer), écarte le prix Cardmarket et utilise le prix TCGplayer de la version exacte, converti en euros.
+
 Prix indicatifs. Application non officielle, sans lien avec The Pokémon Company, Wizards of the Coast ou Konami.
 
 ## Structure

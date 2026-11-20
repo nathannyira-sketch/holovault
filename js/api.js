@@ -346,8 +346,31 @@ const yugioh = {
 
 export const providers = { pokemon, mtg, yugioh };
 
+// Taux USD→EUR utilisé pour le contrôle de cohérence (mis à jour par l'appli)
+let usdToEur = 0.91;
+export const setRate = r => { if (r > 0) usdToEur = r; };
+
+// Contrôle de cohérence des prix.
+// Problème constaté : pour les séries récentes, TCGdex rattache souvent les versions rares
+// (illustration rare, illustration spéciale, hyper rare…) au produit Cardmarket de la version
+// standard. Ex. Méga-Rayquaza-ex 138/141 (Règne Delta) : Cardmarket 2,93 € (prix de la n° 084)
+// alors que TCGplayer donne ~280 $. Quand le prix Cardmarket est très inférieur au prix TCGplayer
+// de la même carte, il est considéré comme faux : on l'écarte et la valeur se base sur TCGplayer.
 export function market(card) {
-  return providers[card.game]?.market(card.pricingRaw, card.variant) || {};
+  const m = providers[card.game]?.market(card.pricingRaw, card.variant) || {};
+  if (card.game !== 'pokemon' || m.eur == null) return m;
+  const drop = () => ({ ...m, cmSuspect: { trend: m.eur, low: m.low }, eur: null, low: null, avg1: null, avg7: null, avg30: null });
+  // 1) certitude : une autre version de la même carte (même série) a le même produit Cardmarket
+  if (card.cmShared) return drop();
+  if (m.usd != null) {
+    // 2) écart énorme avec TCGplayer (un simple écart Europe/USA reste en dessous de ×6)
+    const tpEur = m.usd * usdToEur;
+    if (tpEur >= 1.5 && m.eur * 6 < tpEur) return drop();
+  } else if (m.eur < 1 && /illus|sp[ée]cial|hyper|secr|gold|magnifique|m[ée]ga hyper|ace spec|chromatique/i.test(card.rarity || '')) {
+    // carte très rare à quelques centimes et aucun autre prix pour vérifier : prix jugé non fiable
+    return drop();
+  }
+  return m;
 }
 
 export async function fetchRate() {

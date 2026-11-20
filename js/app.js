@@ -1,5 +1,5 @@
 import { db } from './db.js';
-import { providers, market, fetchRate, marketLinks, GAMES, listSets, correctNames, warmDictionary, setCards, normNum } from './api.js';
+import { providers, market, fetchRate, marketLinks, GAMES, listSets, correctNames, warmDictionary, setCards, normNum, setRate } from './api.js';
 import { visualScores } from './match.js';
 import * as scanner from './scanner.js';
 import { t, setLang, getLang } from './i18n.js';
@@ -1095,6 +1095,8 @@ function priceHTML(c) {
       </div>
       ${pl != null ? `<div class="pl ${pl >= 0 ? 'up' : 'down'}"><div class="muted small">${t('profit')}</div><b>${pl >= 0 ? '+' : ''}${money(pl)}</b><div class="small">${c.purchase ? pct(pl / c.purchase) : ''}</div></div>` : ''}
     </div>
+    ${m.cmSuspect ? `<div class="v-warn price-warn">${icon('info')}<div><b>${t('cmSuspectTitle')}</b>
+      <span>${t(m.usd != null ? 'cmSuspectText' : 'cmSuspectNoTp').replace('{cm}', money(m.cmSuspect.trend, 'EUR'))}</span></div></div>` : ''}
     <div class="verdict ${vcls}">${icon(vcls === 'up' ? 'up' : vcls === 'down' ? 'down' : 'flat')}<span>${verdict}</span></div>
     ${pts.length >= 2 ? `<div class="chart-box"><div class="muted small">${t('cmTrend')}</div>${lineChart(pts.map(p => ({ v: p[1] })), { labels: pts.map(p => p[0]), color: vcls === 'down' ? '#fb7185' : '#34d399', fmt: x => money(x, 'EUR') })}</div>` : ''}
     <div class="price-grid">
@@ -1126,8 +1128,16 @@ function otherVersions(c) {
       const myName = foldName(c.game === 'mtg' ? (c.altName || c.name) : c.name);
       const same = all.filter(r => r.apiId !== c.apiId && normNum(r.number) !== normNum(c.number)
         && foldName(c.game === 'mtg' ? (r.altName || r.name) : r.name) === myName).slice(0, 8);
-      const details = await Promise.all(same.map(r => providers[c.game].getDetails(r.apiId, r.lang || c.lang).catch(() => null)));
-      return details.filter(Boolean).map(d => ({ ...d, value: nmValue(d) })).sort((a, b) => (b.value || 0) - (a.value || 0));
+      const details = (await Promise.all(same.map(r => providers[c.game].getDetails(r.apiId, r.lang || c.lang).catch(() => null)))).filter(Boolean);
+      // Produit Cardmarket partagé entre versions = erreur de la source : seul le numéro le plus bas
+      // (la version standard) garde le prix Cardmarket, les autres passent sur TCGplayer.
+      const group = [c, ...details];
+      const cmId = x => x.pricingRaw?.cardmarket?.idProduct;
+      const numOf = x => parseInt(String(x.number).replace(/\D/g, ''), 10) || 0;
+      group.forEach(x => {
+        x.cmShared = c.game === 'pokemon' && !!cmId(x) && group.some(y => y !== x && cmId(y) === cmId(x) && numOf(y) < numOf(x));
+      });
+      return details.map(d => ({ ...d, value: nmValue(d) })).sort((a, b) => (b.value || 0) - (a.value || 0));
     })().catch(e => { versionsCache.delete(key); throw e; }));
   }
   return versionsCache.get(key);
@@ -1146,7 +1156,7 @@ function swapVersion(c, d) {
   Object.assign(c, {
     apiId: d.apiId, name: d.name, number: d.number, rarity: d.rarity, image: d.image, thumb: d.thumb,
     artist: d.artist, setTotal: d.setTotal ?? c.setTotal, variantsAvailable: d.variantsAvailable,
-    pricingRaw: d.pricingRaw, variant: defaultVariant(d), priceUpdated: Date.now(), history: [], versionOk: true, versionConfirmed: true,
+    pricingRaw: d.pricingRaw, cmShared: !!d.cmShared, variant: defaultVariant(d), priceUpdated: Date.now(), history: [], versionOk: true, versionConfirmed: true,
   });
   pushHistory(c);
 }
@@ -1199,6 +1209,7 @@ async function openAdd(r, { photo, list } = {}) {
     // Autres versions de cette carte dans la série (pour éviter de garder la version la moins chère par erreur)
     otherVersions(c).then(vs => {
       if (!body.isConnected || !vs.length) return;
+      $('#price', body).innerHTML = priceHTML(c); // le prix peut changer (produit Cardmarket partagé)
       pricierFlag = !!pricierVersion(c, vs) && !c.versionOk;
       if (!pricierFlag) c.versionOk = true;
       const box = $('#versions', body);
@@ -1277,6 +1288,8 @@ function openCard(id, { review = false } = {}) {
     otherVersions(c).then(vs => {
       if (!body.isConnected || !vs.length) return;
       const box = $('#versions', body);
+      $('#price', body).innerHTML = priceHTML(c); // le prix peut changer (produit Cardmarket partagé)
+      saveCard(c);
       const draw = () => { box.innerHTML = versionsHTML(c, vs, { review: true }); };
       draw();
       box.onclick = async e => {
@@ -1340,7 +1353,7 @@ function openCard(id, { review = false } = {}) {
 // Les cartes suspectes sont listées pour que tu confirmes ou remplaces la version.
 async function auditVersions({ silent = false } = {}) {
   if (S.auditing) return;
-  const cards = S.cards.filter(c => inCollection(c) && ['pokemon', 'mtg'].includes(c.game) && c.setId && !c.versionOk);
+  const cards = S.cards.filter(c => inCollection(c) && ['pokemon', 'mtg'].includes(c.game) && c.setId && (!c.versionOk || (c.game === 'pokemon' && c.cmShared === undefined)));
   S.auditing = true;
   const tt = silent ? null : toast(`${icon('refresh', 'spin')} ${t('auditRunning')}…`);
   tt?.keep();
@@ -1352,8 +1365,10 @@ async function auditVersions({ silent = false } = {}) {
       const c = queue.shift();
       try {
         const vs = await otherVersions(c);
-        if (pricierVersion(c, vs)) flagged.push(c.uid);
-        else { c.versionOk = true; await db.put(c); } // aucune version plus chère : carte validée
+        if (pricierVersion(c, vs) && !c.versionOk) flagged.push(c.uid);
+        else c.versionOk = true; // aucune version plus chère : carte validée
+        if (c.cmShared === undefined) c.cmShared = false;
+        await db.put(c); // enregistre aussi l'indicateur « produit Cardmarket partagé »
       } catch { /* hors ligne : on réessaiera */ }
       done++;
       tt?.update(`${icon('refresh', 'spin')} ${t('auditRunning')} ${done}/${cards.length}`);
@@ -1669,7 +1684,7 @@ async function refreshAll(silent = false) {
   document.body.classList.add('refreshing');
   const tt = toast(`${icon('refresh', 'spin')} ${t('refreshing')}…`);
   tt.keep();
-  try { const r = await fetchRate(); if (r) S.settings.rate = r; } catch { /* taux par défaut */ }
+  try { const r = await fetchRate(); if (r) { S.settings.rate = r; setRate(r); } } catch { /* taux par défaut */ }
   const cache = new Map();
   let ok = 0, i = 0;
   for (const c of S.cards) {
@@ -1712,6 +1727,16 @@ async function init() {
     S.cards = (await db.all()) || [];
     S.valueHistory = (await db.getMeta('valueHistory')) || [];
   } catch (e) { console.error(e); }
+  setRate(S.settings.rate);
+  // Correctif des prix (v2) : les valeurs ont changé, on refait la vérification des versions
+  // (sauf pour les cartes que tu as confirmées toi-même)
+  if ((S.settings.priceFix || 0) < 2) {
+    S.cards.forEach(c => { if (c.versionOk && !c.versionConfirmed) c.versionOk = false; });
+    await db.putMany(S.cards).catch(() => {});
+    S.settings.auditAt = 0;
+    S.settings.priceFix = 2;
+    saveSettings();
+  }
   setLang(S.settings.uiLang);
   applyStaticI18n();
   history.replaceState({ sheet: 0 }, '');
