@@ -198,7 +198,7 @@ function cardVisual(c, cls = '') {
   </div>`;
 }
 function thumbImg(src, alt = '') {
-  return `<div class="ph">${icon('cards')}</div>${src ? `<img src="${esc(src)}" alt="${esc(alt)}" loading="lazy" onerror="this.remove()">` : ''}`;
+  return `<div class="ph"></div>${src ? `<img src="${esc(src)}" alt="${esc(alt)}" loading="lazy" decoding="async" onerror="this.remove()">` : ''}`;
 }
 
 // ---------------------------------------------------------------- navigation
@@ -221,6 +221,14 @@ function go() {
   if (name !== 'scan') window.scrollTo({ top: 0 });
 }
 window.addEventListener('hashchange', go);
+
+// Redessine la page courante en gardant la position de défilement
+function rerender() {
+  const y = window.scrollY;
+  routes[S.route]?.();
+  window.scrollTo(0, y);
+  setTimeout(() => window.scrollTo(0, y), 0); // après l'insertion du classeur complet
+}
 
 function applyStaticI18n() {
   document.documentElement.lang = getLang();
@@ -508,7 +516,8 @@ function renderCollection() {
   // Précharge en douceur la liste de chaque série possédée : les classeurs s'ouvriront sans attente
   const idle = window.requestIdleCallback || (fn => setTimeout(fn, 800));
   idle(() => sortedTabs.slice(0, 12).forEach(g => setCards(g.game, g.lang || S.settings.cardLang, { setId: g.setId, set: g.set }).catch(() => {})));
-  enrichSets(groups, () => { if (S.route === 'collection' && !sheets.length) renderCollection(); });
+  // ne redessine que si l'on est en haut de l'aperçu (jamais pendant que l'on fait défiler un classeur)
+  enrichSets(groups, () => { if (S.route === 'collection' && !sheets.length && S.colTab === 'overview' && window.scrollY < 80) renderCollection(); });
 }
 
 function renderOverview(box, groups, items) {
@@ -585,7 +594,7 @@ function renderBinder(box, g) {
 
   const out = $('#binder', box);
   // Vignette légère : image décodée hors du fil principal, pas d'animation par carte
-  const img = (src, alt) => `<div class="ph">${icon('cards')}</div>${src ? `<img src="${esc(src)}" alt="${esc(alt)}" loading="lazy" decoding="async" onerror="this.remove()">` : ''}`;
+  const img = (src, alt) => `<div class="ph"></div>${src ? `<img src="${esc(src)}" alt="${esc(alt)}" loading="lazy" decoding="async" onerror="this.remove()">` : ''}`;
   const ownedSlot = cards => {
     const c = cards.slice().sort((a, b) => (unitValue(b) || 0) - (unitValue(a) || 0))[0];
     const qty = sum(cards, x => x.qty || 1);
@@ -623,7 +632,7 @@ function renderBinder(box, g) {
       const mine = owned.get(n);
       if (mine) { seen.add(n); return ownedSlot(mine); }
       return `<button class="slot missing" data-miss="${i}">
-        <div class="slot-img">${img(r.thumb, r.name)}<span class="slot-add">${icon('plus')}</span></div>
+        <div class="slot-img">${img(r.thumb, r.name)}<span class="slot-add">+</span></div>
         <span class="slot-num">#${esc(r.number)}</span><span class="slot-name">${esc(r.name)}</span>
       </button>`;
     }).join('');
@@ -1134,7 +1143,7 @@ async function openAdd(r, { photo, list } = {}) {
     if (c.list !== 'wishlist') celebrate(before, progressOf(), c.set || '');
     snapshotValue();
     closeSheets(sheets.length);
-    if (S.route !== 'scan') go();
+    if (S.route !== 'scan') rerender();
   };
 }
 
@@ -1142,7 +1151,8 @@ async function openAdd(r, { photo, list } = {}) {
 function openCard(id) {
   const c = S.cards.find(x => x.uid === id);
   if (!c) return;
-  const body = openSheet('', { cls: 'tall', onClose: () => { if (S.route !== 'scan') go(); } });
+  let dirty = false; // on ne redessine la page à la fermeture que si la carte a changé
+  const body = openSheet('', { cls: 'tall', onClose: () => { if (dirty && S.route !== 'scan') rerender(); } });
   const links = marketLinks(c);
   body.innerHTML = `
     <div class="detail-head">
@@ -1167,14 +1177,14 @@ function openCard(id) {
       <button class="btn danger" id="c-del">${icon('trash')}${t('delete')}</button>
     </div>`;
   bindTilt(body);
-  bindFields(body, c, async () => { $('#price', body).innerHTML = priceHTML(c); await saveCard(c); });
+  bindFields(body, c, async () => { dirty = true; $('#price', body).innerHTML = priceHTML(c); await saveCard(c); });
 
   $('#c-refresh', body).onclick = async e => {
     const b = e.currentTarget; b.classList.add('loading');
     try {
       const d = await providers[c.game].getDetails(c.apiId, c.lang, { setCode: c.number });
       c.pricingRaw = d.pricingRaw; c.priceUpdated = Date.now();
-      pushHistory(c); await saveCard(c);
+      pushHistory(c); await saveCard(c); dirty = true;
       $('#price', body).innerHTML = priceHTML(c);
       toast(t('priceUpdated'), 'ok');
     } catch { toast(t('networkError'), 'warn'); }
@@ -1187,14 +1197,14 @@ function openCard(id) {
   };
   $('#c-move', body).onclick = async () => {
     c.list = c.list === 'wishlist' ? 'collection' : 'wishlist';
-    await saveCard(c); snapshotValue();
+    await saveCard(c); snapshotValue(); dirty = true;
     toast(t(c.list === 'wishlist' ? 'movedWish' : 'movedCol'), 'ok');
     closeSheet();
   };
   $('#c-del', body).onclick = async () => {
     if (!confirm(t('confirmDelete').replace('{n}', c.name))) return;
     S.cards = S.cards.filter(x => x.uid !== c.uid);
-    await db.del(c.uid); snapshotValue();
+    await db.del(c.uid); snapshotValue(); dirty = true;
     toast(t('deleted'));
     closeSheet();
   };
@@ -1456,7 +1466,11 @@ async function refreshAll(silent = false) {
   document.body.classList.remove('refreshing');
   tt.close();
   toast(`${icon('check')} ${ok}/${S.cards.length} ${t('pricesUpdated')}`, 'ok');
-  if (!sheets.length && S.route !== 'scan') go();
+  // pas de re-dessin brutal si l'utilisateur est en train de parcourir la page : on met juste à jour la valeur
+  if (!sheets.length && S.route !== 'scan') {
+    if (window.scrollY < 80 && (S.route !== 'collection' || S.colTab === 'overview')) rerender();
+    else if ($('#hero-num')) countUp($('#hero-num'), sum(S.cards.filter(inCollection), c => lineValue(c)));
+  }
 }
 
 // ---------------------------------------------------------------- démarrage
